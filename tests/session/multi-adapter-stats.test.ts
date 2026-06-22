@@ -207,8 +207,11 @@ describe("Slice 2.1b — enumerateAdapterDirs CLAUDE_CONFIG_DIR (#865)", () => {
     try {
       const dirs = enumerateAdapterDirs({ home: "/HOME" });
       const byName = Object.fromEntries(dirs.map((d) => [d.name, d]));
+      // resolveClaudeConfigDir() applies resolve() to $CLAUDE_CONFIG_DIR, which on
+      // Windows prepends the current drive (e.g. D:\tmp\...). Mirror that here so the
+      // expectation matches on every platform (no-op on POSIX). (#866 Windows CI)
       expect(byName["claude-code"].sessionsDir).toBe(
-        join("/tmp/custom-claude-cfg", "context-mode", "sessions"),
+        join(resolve("/tmp/custom-claude-cfg"), "context-mode", "sessions"),
       );
       expect(byName["codex"].sessionsDir).toBe(
         join("/HOME", ".codex", "context-mode", "sessions"),
