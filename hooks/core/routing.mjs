@@ -273,13 +273,13 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform) {
     return guidanceOnce("grep", grepGuidance);
   }
 
-  // ─── WebFetch: deny + redirect to sandbox ───
+  // ─── WebFetch: nudge toward ctx_fetch_and_index (once per session) ───
+  // Hook stdin carries no per-agent tool list, so a hard deny strands
+  // subagents that don't have the ctx_* MCP tools with no web access at all.
   if (canonical === "WebFetch") {
     const url = toolInput.url ?? "";
-    return {
-      action: "deny",
-      reason: `context-mode: WebFetch blocked. Use ${t("ctx_fetch_and_index")}(url: "${url}", source: "...") to fetch this URL in sandbox. Then use ${t("ctx_search")}(queries: [...]) to query results. Do NOT use curl, wget, mcp_web_fetch, or mcp_fetch_tool.`,
-    };
+    const webFetchGuidance = `context-mode: prefer ${t("ctx_fetch_and_index")}(url: "${url}", source: "...") to fetch this URL in sandbox, then ${t("ctx_search")}(queries: [...]) to query results. Falling back to WebFetch is allowed if ctx_* tools are unavailable.`;
+    return guidanceOnce("webfetch", webFetchGuidance);
   }
 
   // ─── Agent/Task: inject context-mode routing into subagent prompts ───
