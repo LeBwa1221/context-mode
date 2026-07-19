@@ -11,6 +11,7 @@ import { execSync } from "node:child_process";
 
 const CACHE_TTL_MS = 60_000;
 const FETCH_TIMEOUT_MS = 2_000;
+const SUPPRESS_TTL_MS = 24 * 60 * 60 * 1000; // 402 back-off window
 const MAX_FIELD_LEN = 200;
 const MAX_DEPTH = 4;
 
@@ -54,7 +55,35 @@ function normalizeConfig(raw) {
   if (!platform_url && raw.events_url) platform_url = String(raw.events_url).replace(/\/events$/, "");
   if (typeof api_key !== "string" || !api_key.startsWith("ctxm_")) return null;
   if (typeof platform_url !== "string" || !platform_url) return null;
-  return { api_key, platform_url: platform_url.replace(/\/$/, "") };
+  const cfg = { api_key, platform_url: platform_url.replace(/\/$/, "") };
+  // 402 suppress marker (churned-org back-off) rides the same file so it
+  // survives restarts and is shared across concurrent sessions.
+  if (typeof raw.suppressed_until === "number" && Number.isFinite(raw.suppressed_until)) {
+    cfg.suppressed_until = raw.suppressed_until;
+  }
+  return cfg;
+}
+
+// === 402 suppress marker (churned-org back-off) ===
+// A 402 ("Subscription required") means the org churned — hammering the
+// platform on every event forever is pure waste. Persist `suppressed_until`
+// (epoch ms) INTO platform.json itself: same file, same read/write ownership,
+// no sibling cache to invent. null → clear the marker.
+function persistSuppressMarker(untilMs) {
+  // In-memory first — suppression must hold within this process even if the
+  // file write fails (read-only FS, concurrent uninstall).
+  if (_cache && _cache !== NO_CONFIG) {
+    if (untilMs != null) _cache.suppressed_until = untilMs;
+    else delete _cache.suppressed_until;
+  }
+  const cfgPath = configPath();
+  try {
+    const raw = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+    if (untilMs != null) raw.suppressed_until = untilMs;
+    else if (raw.suppressed_until === undefined) return; // nothing to clear — skip the write
+    else delete raw.suppressed_until;
+    fs.writeFileSync(cfgPath, JSON.stringify(raw, null, 2) + "\n");
+  } catch { /* unreadable/unwritable — in-memory state already updated */ }
 }
 
 function readConfig() {
@@ -269,6 +298,15 @@ export async function maybeForward(event, platform, opts = {}) {
   const cfg = readConfig();
   if (!cfg) return;
 
+  // 402 suppression gate — BEFORE any allocation or network call. Active
+  // marker → the org's subscription is inactive; stay silent for 24h.
+  // Expired marker → clear it and proceed, so reactivated orgs resume
+  // automatically within 24h even without a fresh login.
+  if (typeof cfg.suppressed_until === "number") {
+    if (cfg.suppressed_until > Date.now()) return;
+    persistSuppressMarker(null);
+  }
+
   // Project identity must be resolved from the RAW projectDir — the resolver
   // reads `git config` against the actual filesystem path. After sanitize,
   // $HOME-normalization would break the lookup. We overlay the resolved id
@@ -306,7 +344,26 @@ export async function maybeForward(event, platform, opts = {}) {
       }),
       signal: ctrl.signal,
     });
-    if (res.status === 401) { _cache = null; _cacheLoadedAt = 0; }
+    if (res.ok) {
+      // Reactivation: a successful forward clears any lingering suppress
+      // marker (e.g. written by a concurrent session) — immediate resume.
+      if (_cache !== null && _cache !== NO_CONFIG && _cache.suppressed_until !== undefined) {
+        persistSuppressMarker(null);
+      }
+    }
+    else if (res.status === 401) { _cache = null; _cacheLoadedAt = 0; }
+    else if (res.status === 402) {
+      // Subscription inactive (churned org) — pause ALL forwards for 24h.
+      // Dedupe: a burst of in-flight events all passed the gate before the
+      // first 402 landed; only the first response writes + notes.
+      const alreadySuppressed = _cache !== null && _cache !== NO_CONFIG
+        && typeof _cache.suppressed_until === "number"
+        && _cache.suppressed_until > Date.now();
+      if (!alreadySuppressed) {
+        persistSuppressMarker(Date.now() + SUPPRESS_TTL_MS);
+        process.stderr.write("context-mode: platform subscription inactive — forwards paused for 24h\n");
+      }
+    }
     else if (res.status === 429) {
       process.stderr.write(`[context-mode-platform] rate limited (retry after ${res.headers.get("Retry-After")}s)\n`);
     }
