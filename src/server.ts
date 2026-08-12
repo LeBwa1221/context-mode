@@ -1689,7 +1689,7 @@ background: true keeps a long-running process alive past the timeout. intent: se
       timeout: z
         .coerce.number()
         .optional()
-        .describe("Max execution time in ms. Omit to use the MCP host's RPC timeout; set explicitly for long-running builds (Gradle/Maven/SBT)."),
+        .describe("Max execution time in ms. Omit for the MCP host's RPC timeout; set for long-running builds."),
       // background: wrapped in coerceBoolean preprocessor so the literal
       // strings "true"/"false" arriving from OpenCode's native plugin
       // bridge (and several LLM providers' tool-call JSON) parse as the
@@ -1699,11 +1699,11 @@ background: true keeps a long-running process alive past the timeout. intent: se
         .preprocess(coerceBoolean, z.boolean())
         .optional()
         .default(false)
-        .describe("Keep the process running past the timeout instead of killing it (servers/daemons). Do NOT add self-close timers in background scripts."),
+        .describe("Keep the process running past the timeout instead of killing it (servers/daemons). Do NOT add self-close timers."),
       cwd: z
         .string()
         .optional()
-        .describe("Optional working directory for shell commands. Non-shell languages still execute from their sandbox temp directory."),
+        .describe("Optional working directory for shell commands."),
       intent: z
         .string()
         .optional()
@@ -2217,33 +2217,19 @@ Use for docs, API references, README/changelog content you'll query precisely la
         .string()
         .optional()
         .describe(
-          "File OR directory path to read and index (content never enters context). Provide this OR content. Directory paths trigger a bounded recursive walk.",
+          "File OR directory path to read and index (content never enters context). Provide this OR content.",
         ),
       source: z
         .string()
         .optional()
         .describe("Label for the indexed content."),
-      include: z.array(z.string()).optional().describe(
-        "Directory-only: glob patterns to include (default: all matching extensions).",
-      ),
-      exclude: z.array(z.string()).optional().describe(
-        "Directory-only: glob patterns to exclude (merged with node_modules/.git/dist/build defaults).",
-      ),
-      maxDepth: z.number().int().min(0).optional().describe(
-        "Directory-only: max recursion depth (default: 5).",
-      ),
-      maxFiles: z.number().int().min(1).optional().describe(
-        "Directory-only: hard cap on files indexed (default: 200).",
-      ),
-      extensions: z.array(z.string()).optional().describe(
-        "Directory-only: allowed file extensions (default: common doc/code extensions).",
-      ),
-      respectGitignore: z.boolean().optional().describe(
-        "Directory-only: apply nearest .gitignore (default: true).",
-      ),
-      followSymlinks: z.boolean().optional().describe(
-        "Directory-only: follow symlinks (default: false - cycle/escape risk).",
-      ),
+      include: z.array(z.string()).optional().describe("Dir-only: glob include patterns."),
+      exclude: z.array(z.string()).optional().describe("Dir-only: glob exclude patterns (merged with defaults)."),
+      maxDepth: z.number().int().min(0).optional().describe("Dir-only: max recursion depth (default: 5)."),
+      maxFiles: z.number().int().min(1).optional().describe("Dir-only: file cap (default: 200)."),
+      extensions: z.array(z.string()).optional().describe("Dir-only: allowed extensions (default: common doc/code)."),
+      respectGitignore: z.boolean().optional().describe("Dir-only: apply .gitignore (default: true)."),
+      followSymlinks: z.boolean().optional().describe("Dir-only: follow symlinks (default: false)."),
     }),
   },
   async ({ content, path, source, include, exclude, maxDepth, maxFiles, extensions, respectGitignore, followSymlinks }) => {
@@ -3601,9 +3587,7 @@ WHEN NOT: a single command with no follow-up query - use ctx_execute directly.`,
           z.object({
             label: z
               .string()
-              .describe(
-                "Section header for this command's output (e.g., 'README', 'Package.json', 'Source Tree')",
-              ),
+              .describe("Section header for this command's output (e.g., 'README')"),
             command: z
               .string()
               .describe("Shell command to execute"),
@@ -3611,7 +3595,7 @@ WHEN NOT: a single command with no follow-up query - use ctx_execute directly.`,
         )
         .min(1)
         .describe(
-          "Commands to execute as a batch, sequential by default. Pass concurrency>1 to run in parallel (output stays in input order).",
+          "Commands to execute as a batch, sequential by default. concurrency>1 runs in parallel (output stays in input order).",
         )),
       queries: z.preprocess(coerceJsonArray, z
         .array(z.string())
@@ -3622,7 +3606,7 @@ WHEN NOT: a single command with no follow-up query - use ctx_execute directly.`,
       timeout: z
         .coerce.number()
         .optional()
-        .describe("Max execution time in ms. Omit to use the MCP host's RPC timeout. Shared at concurrency=1, per-command at >1."),
+        .describe("Max execution time in ms. Omit for the MCP host's RPC timeout. Shared at concurrency=1, per-command at >1."),
       concurrency: z
         .coerce.number()
         .int()
@@ -3636,13 +3620,13 @@ WHEN NOT: a single command with no follow-up query - use ctx_execute directly.`,
       cwd: z
         .string()
         .optional()
-        .describe("Optional working directory for all shell commands in this batch."),
+        .describe("Optional working directory for all commands in this batch."),
       query_scope: z
         .enum(["batch", "global"])
         .optional()
         .default("batch")
         .describe(
-          "Scope for `queries` (default: `batch`, only this batch's output). `global` also searches the entire persistent index, same scope as ctx_search.",
+          "Scope for `queries` (default `batch`: only this batch's output). `global`: also searches the entire persistent index.",
         ),
     }),
   },
