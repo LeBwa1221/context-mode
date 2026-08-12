@@ -19,14 +19,11 @@ import {
   readdirSync,
   chmodSync,
   accessSync,
-  mkdirSync,
   constants,
 } from "node:fs";
 import { resolve, join } from "node:path";
-import { homedir } from "node:os";
 
 import { ClaudeCodeBaseAdapter, type ClaudeCodeWireInput } from "../claude-code-base.js";
-import { resolveContextModeDataRoot } from "../base.js";
 import { resolveClaudeConfigDir } from "../../util/claude-config.js";
 import { checkPluginCacheIntegritySync } from "../../util/plugin-cache-integrity.js";
 
@@ -99,18 +96,9 @@ export class ClaudeCodeAdapter extends ClaudeCodeBaseAdapter implements HookAdap
     return resolveClaudeConfigDir();
   }
 
-  getSessionDir(): string {
-    // Issue #649: honor CONTEXT_MODE_DATA_DIR universal storage override
-    // before falling back to the Claude-rooted default. The override moves
-    // ONLY context-mode-owned state; settings.json + CLAUDE_CONFIG_DIR stay
-    // intact below.
-    const override = resolveContextModeDataRoot();
-    const dir = override
-      ? join(override, "context-mode", "sessions")
-      : join(this.getConfigDir(), "context-mode", "sessions");
-    mkdirSync(dir, { recursive: true });
-    return dir;
-  }
+  // getSessionDir() is inherited from BaseAdapter unchanged: maint/global-store
+  // made BaseAdapter's default itself route through resolveContextModeDataRoot()
+  // (never Claude-rooted), so this override became a byte-for-byte duplicate.
 
   getSettingsPath(): string {
     return join(this.getConfigDir(), "settings.json");
@@ -419,18 +407,14 @@ export class ClaudeCodeAdapter extends ClaudeCodeBaseAdapter implements HookAdap
       /* fallback below */
     }
 
-    // Fallback: scan common plugin cache locations.
-    // `resolveClaudeConfigDir` honors $CLAUDE_CONFIG_DIR; the literal
-    // `~/.claude` is also retained as a hard floor so environments that
-    // misconfigure the env still find the canonical dir if it exists.
-    const bases = Array.from(
-      new Set([
-        this.getConfigDir(),
-        resolveClaudeConfigDir(),
-        resolve(homedir(), ".claude"),
-        resolve(homedir(), ".config", "claude"),
-      ]),
-    );
+    // Fallback: scan the plugin cache location. `getConfigDir()` already
+    // honors $CLAUDE_CONFIG_DIR via `resolveClaudeConfigDir` (they're the
+    // same call) — no separate hardcoded `~/.claude` / `~/.config/claude`
+    // floor. maint/global-store: that literal fallback was a per-profile
+    // assumption baked into a version-detection path; a user running a
+    // non-default CLAUDE_CONFIG_DIR profile should never have this silently
+    // fall through to a DIFFERENT profile's plugin cache.
+    const bases = [this.getConfigDir()];
     for (const base of bases) {
       const cacheDir = resolve(
         base,

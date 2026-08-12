@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { ClaudeCodeAdapter } from "../../src/adapters/claude-code/index.js";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 import { hashProjectDirCanonical, resolveSessionDbPath } from "../../src/session/db.js";
 import { fakeHome, realHome } from "../setup-home";
 import {
@@ -210,20 +211,25 @@ describe("ClaudeCodeAdapter", () => {
       );
     });
 
-    it("session dir is under ~/.claude/context-mode/sessions/ by default", () => {
+    // maint/global-store: session storage is no longer profile-rooted. It
+    // lives under the shared context-mode data root (resolveContextModeDataRoot,
+    // src/adapters/base.ts) so the same project's memory survives a switch
+    // between Claude Code profiles (~/.claude, ~/.claude-ime, ...).
+    it("session dir is under the shared context-mode data root by default", () => {
       const sessionDir = adapter.getSessionDir();
       expect(sessionDir).toBe(
-        join(homedir(), ".claude", "context-mode", "sessions"),
+        join(resolveContextModeDataRoot(), "context-mode", "sessions"),
       );
     });
 
-    it("session dir honors CLAUDE_CONFIG_DIR (issue #453)", () => {
+    it("session dir is NOT affected by CLAUDE_CONFIG_DIR (settings stay profile-scoped, storage does not)", () => {
       const customRoot = join(fakeHome, ".config", "claude-code");
       process.env.CLAUDE_CONFIG_DIR = customRoot;
       const sessionDir = adapter.getSessionDir();
       expect(sessionDir).toBe(
-        join(customRoot, "context-mode", "sessions"),
+        join(resolveContextModeDataRoot(), "context-mode", "sessions"),
       );
+      expect(sessionDir.startsWith(customRoot)).toBe(false);
     });
 
     it("creates session dirs under fake HOME instead of the contributor real HOME", () => {
@@ -242,7 +248,7 @@ describe("ClaudeCodeAdapter", () => {
         sessionsDir: adapter.getSessionDir(),
       });
       expect(dbPath).toBe(
-        join(homedir(), ".claude", "context-mode", "sessions", `${hash}.db`),
+        join(resolveContextModeDataRoot(), "context-mode", "sessions", `${hash}.db`),
       );
     });
   });
@@ -270,12 +276,10 @@ describe("ClaudeCodeAdapter", () => {
       rmSync(customDir, { recursive: true, force: true });
     });
 
-    // C2 narrowing (2026-05): the test now composes the DB path through
-    // resolveSessionDbPath + adapter.getSessionDir() — this is the SAME
-    // composition production callers (server.ts, opencode plugin, hooks)
-    // perform. The regression pin still holds: $CLAUDE_CONFIG_DIR must
-    // route the file out of ~/.claude.
-    it("DB path lands under $CLAUDE_CONFIG_DIR (not ~/.claude)", () => {
+    // maint/global-store: $CLAUDE_CONFIG_DIR governs settings.json only.
+    // Session storage is global (resolveContextModeDataRoot) precisely so a
+    // project's DB does NOT fork per profile/config-dir anymore.
+    it("DB path is unaffected by $CLAUDE_CONFIG_DIR (storage is global, not profile-rooted)", () => {
       process.env.CLAUDE_CONFIG_DIR = customDir;
       const projectDir = "/test/project";
       const hash = hashProjectDirCanonical(projectDir);
@@ -284,8 +288,9 @@ describe("ClaudeCodeAdapter", () => {
         sessionsDir: adapter.getSessionDir(),
       });
       expect(dbPath).toBe(
-        join(customDir, "context-mode", "sessions", `${hash}.db`),
+        join(resolveContextModeDataRoot(), "context-mode", "sessions", `${hash}.db`),
       );
+      expect(dbPath.startsWith(customDir)).toBe(false);
       // Regression pin: session DB must NOT land under ~/.claude when
       // CLAUDE_CONFIG_DIR is set.
       expect(dbPath.startsWith(join(homedir(), ".claude") + sep)).toBe(false);

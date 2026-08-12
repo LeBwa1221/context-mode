@@ -33,6 +33,18 @@
  * override `getSessionDir`/`getMemoryDir` directly (claude-code, codex,
  * opencode, vscode-copilot) honor the override by routing through
  * `resolveContextModeDataRoot()` at the top of their override.
+ *
+ * maint/global-store — the same project opened under different Claude Code
+ * profiles (`~/.claude`, `~/.claude-ime`, `~/.claude-devcom`, ...) used to
+ * get a separate, divergent knowledge base per profile because the default
+ * fell back to a profile-rooted `homedir() + sessionDirSegments` path.
+ * `resolveContextModeDataRoot()` now NEVER returns null: with no override
+ * env var set it resolves to a single OS-appropriate shared app-data
+ * directory (not tied to any profile), so switching profiles no longer
+ * loses project memory. `CONTEXT_MODE_HOME` is the current name for the
+ * override; `CONTEXT_MODE_DATA_DIR` (#649) is kept as a back-compat alias —
+ * both still mean "the parent directory under which `context-mode/` lives",
+ * unchanged from the #649 contract.
  */
 
 import { join, resolve } from "node:path";
@@ -41,9 +53,37 @@ import { homedir } from "node:os";
 import { hashProjectDirCanonical } from "../session/db.js";
 
 /**
- * Universal storage-root override. Returns the resolved absolute path when
- * `CONTEXT_MODE_DATA_DIR` is set to a non-blank value, otherwise `null` so
- * callers fall back to their platform-native default.
+ * OS-appropriate shared app-data directory used as the default context-mode
+ * data root when no override env var is set. Deliberately NOT derived from
+ * any host's config dir (`~/.claude`, `~/.codex`, ...) — that is exactly the
+ * per-profile coupling this default replaces. Built from `homedir()` rather
+ * than reading `LOCALAPPDATA`/etc directly so the whole resolver stays
+ * mockable through the single `homedir()` seam tests already use (see
+ * tests/setup-home.ts) — matches the platform convention either way.
+ *
+ * Callers append `context-mode/<sessions|memory|...>` themselves (same
+ * contract as before), so this returns the PARENT of that folder, not the
+ * folder itself — e.g. `%LOCALAPPDATA%`, not `%LOCALAPPDATA%\context-mode`.
+ */
+function defaultGlobalDataRoot(env: NodeJS.ProcessEnv): string {
+  if (process.platform === "win32") {
+    return join(homedir(), "AppData", "Local");
+  }
+  if (process.platform === "darwin") {
+    return join(homedir(), "Library", "Application Support");
+  }
+  const xdg = env.XDG_DATA_HOME?.trim();
+  return xdg ? resolve(xdg) : join(homedir(), ".local", "share");
+}
+
+/**
+ * Universal storage-root resolution. Priority:
+ *   1. `CONTEXT_MODE_HOME` (current name)
+ *   2. `CONTEXT_MODE_DATA_DIR` (#649 back-compat alias)
+ *   3. the OS-appropriate global data dir (see `defaultGlobalDataRoot`)
+ *
+ * Always returns an absolute path — never null. Callers append
+ * `context-mode/<sessions|memory|...>` themselves, same contract as #649.
  *
  * Mirrors the `resolveClaudeConfigDir` contract for env-var handling
  * (whitespace guard, tilde expansion, relative-path resolution) so users
@@ -51,23 +91,23 @@ import { hashProjectDirCanonical } from "../session/db.js";
  */
 export function resolveContextModeDataRoot(
   env: NodeJS.ProcessEnv = process.env,
-): string | null {
-  const raw = env.CONTEXT_MODE_DATA_DIR;
-  if (!raw || raw.trim() === "") return null;
-  if (raw.startsWith("~")) {
-    return resolve(homedir(), raw.replace(/^~[/\\]?/, ""));
+): string {
+  const raw = env.CONTEXT_MODE_HOME ?? env.CONTEXT_MODE_DATA_DIR;
+  if (raw && raw.trim() !== "") {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith("~")) {
+      return resolve(homedir(), trimmed.replace(/^~[/\\]?/, ""));
+    }
+    return resolve(trimmed);
   }
-  return resolve(raw);
+  return defaultGlobalDataRoot(env);
 }
 
 export abstract class BaseAdapter {
   constructor(protected readonly sessionDirSegments: string[]) {}
 
   getSessionDir(): string {
-    const override = resolveContextModeDataRoot();
-    const dir = override
-      ? join(override, "context-mode", "sessions")
-      : join(homedir(), ...this.sessionDirSegments, "context-mode", "sessions");
+    const dir = join(resolveContextModeDataRoot(), "context-mode", "sessions");
     mkdirSync(dir, { recursive: true });
     return dir;
   }
@@ -117,10 +157,7 @@ export abstract class BaseAdapter {
    * callers), the unscoped path is returned for backwards compatibility.
    */
   getMemoryDir(projectDir?: string): string {
-    const override = resolveContextModeDataRoot();
-    const base = override
-      ? join(override, "context-mode", "memory")
-      : join(this.getConfigDir(), "memory");
+    const base = join(resolveContextModeDataRoot(), "context-mode", "memory");
     if (!projectDir) return base;
     return join(base, hashProjectDirCanonical(projectDir));
   }
