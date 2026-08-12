@@ -3094,6 +3094,13 @@ function resolveGfmPluginPath(): string {
 // Subprocess code that fetches a URL, detects Content-Type, and outputs a
 // __CM_CT__:<type> marker on the first line so the handler can route to the
 // appropriate indexing strategy.  HTML is converted to markdown via Turndown.
+//
+// SECOND stdout line: the byte length of the response body as received, before
+// any conversion. The parent needs it to tell a JavaScript-rendered shell from
+// a genuinely short document — see classifyExtraction(). The first line keeps
+// its exact historical shape so the `header === "__CM_CT__:json"` comparisons
+// downstream are untouched; the parent reads line 0 as the header and treats a
+// missing or unparseable line 1 as "no evidence" rather than as a failure.
 export function buildFetchCode(url: string, outputPath: string): string {
   const turndownPath = JSON.stringify(resolveTurndownPath());
   const gfmPath = JSON.stringify(resolveGfmPluginPath());
@@ -3259,11 +3266,15 @@ dns.resolve = function patchedResolveGeneric(hostname, rrtype, cb) {
   });
 };
 
-function emit(ct, content) {
+function emit(ct, content, sourceBytes) {
   // Write content to file to bypass executor stdout truncation (100KB limit).
   // Only the content-type marker goes to stdout.
   fs.writeFileSync(outputPath, content);
   console.log('__CM_CT__:' + ct);
+  // Line 2: bytes received off the wire, pre-conversion. Lets the parent
+  // compute extraction yield. Emitted unconditionally so "absent" means
+  // "old bundle", not "zero".
+  console.log(String(typeof sourceBytes === 'number' ? sourceBytes : 0));
 }
 
 // Manual redirect handling: a 3xx Location header can rebind the subprocess
@@ -3345,11 +3356,12 @@ async function main() {
   // --- JSON responses ---
   if (contentType.includes('application/json') || contentType.includes('+json')) {
     const text = await safeText(resp);
+    const received = Buffer.byteLength(text, 'utf-8');
     try {
       const pretty = JSON.stringify(JSON.parse(text), null, 2);
-      emit('json', pretty);
+      emit('json', pretty, received);
     } catch {
-      emit('text', text);
+      emit('text', text, received);
     }
     return;
   }
@@ -3360,13 +3372,13 @@ async function main() {
     const td = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
     td.use(gfm);
     td.remove(['script', 'style', 'nav', 'header', 'footer', 'noscript']);
-    emit('html', td.turndown(html));
+    emit('html', td.turndown(html), Buffer.byteLength(html, 'utf-8'));
     return;
   }
 
   // --- Everything else: plain text, CSV, XML, etc. ---
   const text = await safeText(resp);
-  emit('text', text);
+  emit('text', text, Buffer.byteLength(text, 'utf-8'));
 }
 main();
 `;
@@ -3393,7 +3405,71 @@ function formatFetchTtl(ttlMs: number): string {
 type FetchOneResult =
   | { kind: "cached"; label: string; chunkCount: number; estimatedBytes: number; ageStr: string; ttlStr: string }
   | { kind: "fetched"; url: string; source?: string; markdown: string; header: string }
-  | { kind: "fetch_error"; url: string; error: string; reason: "exit" | "read" | "empty" | "throw" };
+  | { kind: "fetch_error"; url: string; error: string; reason: "exit" | "read" | "empty" | "shell" | "throw" };
+
+// ─────────────────────────────────────────────────────────
+// Extraction verdict — the "silent success" guard
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Text that survives conversion, below which a document carries no usable
+ * content. A page title alone lands around 20 bytes; a one-line answer or a
+ * short redirect notice lands around 100.
+ */
+const SHELL_MAX_TEXT_BYTES = 200;
+
+/**
+ * Fraction of received bytes that must survive conversion. Below this, the
+ * bytes we were served were overwhelmingly markup and script rather than text.
+ */
+const SHELL_MAX_YIELD = 0.02;
+
+export type ExtractionVerdict =
+  | { kind: "ok" }
+  | { kind: "shell"; textBytes: number; sourceBytes: number; yieldPct: string };
+
+/**
+ * Decide whether a non-empty extraction is actually a document or a
+ * JavaScript-rendered shell.
+ *
+ * WHY THIS EXISTS. The old guard was `markdown.length === 0`. A canvas app or
+ * SPA serves a few KB of bootstrap HTML whose entire text content is its
+ * <title>; Turndown faithfully renders that to ~20 bytes. Twenty bytes is not
+ * zero, so the fetch was reported as a success and the shell was indexed as if
+ * it were the page. The caller had no way to tell that apart from a genuinely
+ * short document.
+ *
+ * Measured on this exact code path (2026-08, bytes in -> markdown bytes out):
+ *   excalidraw.com            6,862 ->     21   (0.31% yield)  <- shell
+ *   app.diagrams.net          2,759 ->    476   (17.3% yield)   real prose
+ *   nextjs.org              316,151 -> 13,587   (4.30% yield)   real prose
+ *   developers.cloudflare.com 178,627 -> 8,389  (4.70% yield)   real prose
+ *
+ * Neither signal works alone. A ratio alone condemns a small valid page
+ * (`<p>Hello</p>` is 5 bytes of text from 40 of markup and is perfectly fine).
+ * A floor alone condemns a genuinely short document. Requiring BOTH — almost
+ * no text came out AND almost none of what came in survived — isolates the
+ * shell case and leaves every measured real page above untouched.
+ *
+ * Arithmetic only: no pattern matching, no markup sniffing, no word lists.
+ *
+ * @param textBytes   length of the converted text, already trimmed
+ * @param sourceBytes bytes received off the wire pre-conversion; a
+ *                    non-positive value means the subprocess did not report it
+ *                    (older bundle), and with no evidence we never accuse.
+ */
+export function classifyExtraction(textBytes: number, sourceBytes: number): ExtractionVerdict {
+  if (!Number.isFinite(sourceBytes) || sourceBytes <= 0) return { kind: "ok" };
+  if (!Number.isFinite(textBytes) || textBytes >= SHELL_MAX_TEXT_BYTES) return { kind: "ok" };
+  const ratio = textBytes / sourceBytes;
+  if (ratio >= SHELL_MAX_YIELD) return { kind: "ok" };
+  return {
+    kind: "shell",
+    textBytes,
+    sourceBytes,
+    yieldPct: (ratio * 100).toFixed(2),
+  };
+}
 
 /**
  * Pure fetch step — TTL cache check + subprocess fetch. SAFE TO RUN IN PARALLEL.
@@ -3597,7 +3673,11 @@ async function fetchOneUrl(url: string, source: string | undefined, force: boole
         : "";
       return { kind: "fetch_error", url, error: `${raw}${hint}`, reason: "exit" };
     }
-    const header = (result.stdout || "").trim();
+    // Line 0 is the __CM_CT__ marker (unchanged contract). Line 1, when
+    // present, is the pre-conversion byte count the subprocess received.
+    const stdoutLines = (result.stdout || "").trim().split("\n");
+    const header = (stdoutLines[0] || "").trim();
+    const sourceBytes = Number.parseInt((stdoutLines[1] || "").trim(), 10);
     let markdown: string;
     try {
       // Parent-side defense-in-depth on the subprocess output size. The
@@ -3616,6 +3696,22 @@ async function fetchOneUrl(url: string, source: string | undefined, force: boole
     }
     if (markdown.length === 0) {
       return { kind: "fetch_error", url, error: "empty content", reason: "empty" };
+    }
+    // Non-empty is not the same as non-shell. Refuse to index a bootstrap
+    // shell as if it were the page, and say exactly why so the agent does not
+    // simply retry the same URL and get the same 21 bytes.
+    const verdict = classifyExtraction(markdown.length, sourceBytes);
+    if (verdict.kind === "shell") {
+      return {
+        kind: "fetch_error",
+        url,
+        error:
+          `extracted only ${verdict.textBytes} bytes of text from ${verdict.sourceBytes} bytes received ` +
+          `(${verdict.yieldPct}% yield) — the response was a shell whose content is rendered client-side ` +
+          `by JavaScript, so an HTTP fetch cannot see it. Nothing was indexed. Retrying this URL returns ` +
+          `the same shell; look for a docs, README, or API URL for this site instead.`,
+        reason: "shell",
+      };
     }
     return { kind: "fetched", url, source, markdown, header };
   } catch (err: unknown) {
@@ -3768,7 +3864,7 @@ WHEN NOT: content is already local (use ctx_index) or the page is SPA-rendered (
     type Finalized =
       | { kind: "cached"; label: string; chunkCount: number; ageStr: string; ttlStr: string }
       | { kind: "fetched"; indexed: IndexedFetchResult }
-      | { kind: "fetch_error"; url: string; error: string; reason: "exit" | "read" | "empty" | "throw" }
+      | { kind: "fetch_error"; url: string; error: string; reason: "exit" | "read" | "empty" | "shell" | "throw" }
       | { kind: "job_error"; url: string; error: string };
 
     const finalized: Finalized[] = [];
@@ -3837,6 +3933,7 @@ WHEN NOT: content is already local (use ctx_index) or the page is SPA-rendered (
       if (r.kind === "fetch_error") {
         const text =
           r.reason === "empty" ? `Fetched ${r.url} but got empty content`
+          : r.reason === "shell" ? `Fetched ${r.url} but ${r.error}`
           : r.reason === "read" ? `Fetched ${r.url} but could not read subprocess output`
           : r.reason === "exit" ? `Failed to fetch ${r.url}: ${r.error}`
           : /* throw */         `Fetch error: ${r.error}`;
