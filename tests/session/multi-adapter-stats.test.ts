@@ -390,6 +390,83 @@ describe("maint/global-store — no double-count when adapters share a dir", () 
   });
 });
 
+// maint/global-store — project-level dedup between a legacy adapter dir and
+// the new global root. adoptLargestLegacyDb() COPIES a project's DB forward
+// (never deletes the original), so the SAME <hash>.db filename can exist in
+// both places for a migrated project. The global copy is a strict superset
+// (only it receives new writes post-migration), so it must win — counting
+// both would double a migrated project's entire history.
+describe("maint/global-store — project-level dedup (legacy vs global root copy)", () => {
+  function globalSessionsDirFor(home: string): string {
+    return join(resolveContextModeDataRoot(process.env, home), "context-mode", "sessions");
+  }
+
+  test("a project migrated to the global root is counted ONCE, using the global copy", () => {
+    const home = tmpHome();
+    const legacySessions = ensureDir(join(home, ".claude", "context-mode", "sessions"));
+    const globalSessions = ensureDir(globalSessionsDirFor(home));
+    const hash = "eeeeeeeeeeeeeeee";
+
+    // Legacy copy: 2 events, frozen since migration (adoptLargestLegacyDb
+    // never writes to it again).
+    seed(dbPathFor(legacySessions, hash), `legacy-${randomUUID()}`, [
+      { type: "tool_use", category: "file", data: "old-a", projectDir: "/p/migrated" },
+      { type: "tool_use", category: "file", data: "old-b", projectDir: "/p/migrated" },
+    ]);
+    // Global copy: adopted the same 2 events PLUS 1 new one written after
+    // migration — the superset.
+    seed(dbPathFor(globalSessions, hash), `global-${randomUUID()}`, [
+      { type: "tool_use", category: "file", data: "old-a", projectDir: "/p/migrated" },
+      { type: "tool_use", category: "file", data: "old-b", projectDir: "/p/migrated" },
+      { type: "tool_use", category: "file", data: "new-c", projectDir: "/p/migrated" },
+    ]);
+
+    const r = getMultiAdapterLifetimeStats({ home, claudeConfigDir: join(home, ".claude") });
+
+    // Only the global copy's 3 events count, not 3 + 2 = 5.
+    expect(r.totalEvents).toBe(3);
+    const cc = r.perAdapter.find((a) => a.name === "claude-code")!;
+    expect(cc.eventCount).toBe(0); // legacy claude-code entry contributed nothing — its only file was excluded
+    const global = r.perAdapter.find((a) => a.name === "context-mode")!;
+    expect(global.eventCount).toBe(3);
+  });
+
+  test("an un-migrated project (legacy-only, no global copy) is still counted normally", () => {
+    const home = tmpHome();
+    const legacySessions = ensureDir(join(home, ".claude", "context-mode", "sessions"));
+    seed(dbPathFor(legacySessions, "ffffffffffffffff"), `unmigrated-${randomUUID()}`, [
+      { type: "tool_use", category: "file", data: "x", projectDir: "/p/unmigrated" },
+    ]);
+    // No global-root dir created at all — nothing has been migrated yet.
+
+    const r = getMultiAdapterLifetimeStats({ home, claudeConfigDir: join(home, ".claude") });
+
+    expect(r.totalEvents).toBe(1); // not blind to it
+    const cc = r.perAdapter.find((a) => a.name === "claude-code")!;
+    expect(cc).toBeDefined();
+    expect(cc.eventCount).toBe(1);
+  });
+
+  test("getMultiAdapterRealBytesStats also prefers the global copy for a migrated project", () => {
+    const home = tmpHome();
+    const legacySessions = ensureDir(join(home, ".claude", "context-mode", "sessions"));
+    const globalSessions = ensureDir(globalSessionsDirFor(home));
+    const hash = "1234567812345678";
+
+    seed(dbPathFor(legacySessions, hash), `legacy-${randomUUID()}`, [
+      { type: "x", category: "sandbox", data: "p", bytesAvoided: 2_000 },
+    ]);
+    seed(dbPathFor(globalSessions, hash), `global-${randomUUID()}`, [
+      { type: "x", category: "sandbox", data: "p", bytesAvoided: 2_000 },
+      { type: "x", category: "sandbox", data: "q", bytesAvoided: 9_000 },
+    ]);
+
+    const r = getMultiAdapterRealBytesStats({ home, claudeConfigDir: join(home, ".claude") });
+
+    expect(r.bytesAvoided).toBe(11_000); // the global copy's total, not 11_000 + 2_000
+  });
+});
+
 describe("maint/global-store — enumeration matches real adapter defaults (drift guard)", () => {
   test("the context-mode entry matches ClaudeCodeAdapter's real getSessionDir() (no explicit override set)", async () => {
     const { ClaudeCodeAdapter } = await import("../../src/adapters/claude-code/index.js");
