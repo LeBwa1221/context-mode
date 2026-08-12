@@ -372,27 +372,27 @@ describe("routePreToolUse", () => {
   // ─── WebFetch routing ──────────────────────────────────
 
   describe("WebFetch tool", () => {
-    it("returns deny action with redirect message", () => {
+    // #927/#1006/#984/#1037: downgraded from a hard deny to a periodic
+    // advisory (same mechanism as the external-MCP nudge) - the deny used to
+    // strand subagents without ctx_* tools with no web access at all, and
+    // broke claude.ai artifact URLs. WebFetch is now always allowed through;
+    // these tests check the advisory, not a block.
+    it("returns context action with advisory message, WebFetch still allowed", () => {
       const result = routePreToolUse("WebFetch", {
         url: "https://docs.example.com",
         prompt: "Get the docs",
       });
       expect(result).not.toBeNull();
-      expect(result!.action).toBe("deny");
-      // PR #654 substitute: imperative-positive framing, no "blocked" wording,
-      // explicit retry hint to keep Haiku-tier agents from capitulating to
-      // training data on transient DNS errors (audit Probe 3).
-      expect(result!.reason).toContain("WebFetch redirected");
-      expect(result!.reason).not.toContain("WebFetch blocked");
-      expect(result!.reason).toContain("fetch_and_index");
-      expect(result!.reason).toMatch(/retry/i);
+      expect(result!.action).toBe("context");
+      expect(result!.additionalContext).toContain("fetch_and_index");
+      expect(result!.additionalContext).toContain("WebFetch still works");
     });
 
-    it("includes the URL in deny reason", () => {
+    it("includes the URL in the advisory", () => {
       const url = "https://api.github.com/repos/test";
       const result = routePreToolUse("WebFetch", { url });
       expect(result).not.toBeNull();
-      expect(result!.reason).toContain(url);
+      expect(result!.additionalContext).toContain(url);
     });
 
     it("treats agy read_url_content URL payloads as WebFetch", () => {
@@ -405,31 +405,47 @@ describe("routePreToolUse", () => {
         "agy-read-url",
       );
       expect(result).not.toBeNull();
-      expect(result!.action).toBe("deny");
-      expect(result!.reason).toContain(url);
+      expect(result!.action).toBe("context");
+      expect(result!.additionalContext).toContain(url);
       // agy's call surface is context-mode/<tool> (see hooks/core/tool-naming.mjs),
       // not Claude's mcp__context-mode__<tool> form.
-      expect(result!.reason).toContain("context-mode/ctx_fetch_and_index");
+      expect(result!.additionalContext).toContain("context-mode/ctx_fetch_and_index");
     });
 
-    it("treats mcp_web_fetch as WebFetch and blocks it", () => {
+    it("treats mcp_web_fetch as WebFetch and nudges toward the sandbox", () => {
       const url = "https://example.com";
       const result = routePreToolUse("mcp_web_fetch", { url });
       expect(result).not.toBeNull();
-      expect(result!.action).toBe("deny");
-      expect(result!.reason).toContain("WebFetch redirected");
-      expect(result!.reason).toContain("fetch_and_index");
-      expect(result!.reason).toContain("ctx_search");
+      expect(result!.action).toBe("context");
+      expect(result!.additionalContext).toContain("fetch_and_index");
+      expect(result!.additionalContext).toContain("ctx_search");
     });
 
-    it("treats mcp_fetch_tool as WebFetch and blocks it", () => {
+    it("treats mcp_fetch_tool as WebFetch and nudges toward the sandbox", () => {
       const url = "https://example.com";
       const result = routePreToolUse("mcp_fetch_tool", { url });
       expect(result).not.toBeNull();
-      expect(result!.action).toBe("deny");
-      expect(result!.reason).toContain("WebFetch redirected");
-      expect(result!.reason).toContain("fetch_and_index");
-      expect(result!.reason).toContain("ctx_search");
+      expect(result!.action).toBe("context");
+      expect(result!.additionalContext).toContain("fetch_and_index");
+      expect(result!.additionalContext).toContain("ctx_search");
+    });
+
+    it("only nudges once per session, not on every call (#1026-style cadence)", () => {
+      const sessionId = "webfetch-cadence-test";
+      const first = routePreToolUse("WebFetch", { url: "https://example.com" }, undefined, "claude-code", sessionId);
+      const second = routePreToolUse("WebFetch", { url: "https://example.com" }, undefined, "claude-code", sessionId);
+      expect(first).not.toBeNull();
+      expect(second).toBeNull();
+    });
+
+    it("suppresses the nudge entirely via CONTEXT_MODE_SUPPRESS_WEBFETCH_NUDGE", () => {
+      process.env.CONTEXT_MODE_SUPPRESS_WEBFETCH_NUDGE = "1";
+      try {
+        const result = routePreToolUse("WebFetch", { url: "https://example.com" });
+        expect(result).toBeNull();
+      } finally {
+        delete process.env.CONTEXT_MODE_SUPPRESS_WEBFETCH_NUDGE;
+      }
     });
 
     it("allows WebFetch when MCP server not ready (#230)", () => {
@@ -457,7 +473,7 @@ describe("routePreToolUse", () => {
       expect(result).toBeNull();
     });
 
-    it("keeps WebFetch redirected when options are omitted", () => {
+    it("keeps the WebFetch advisory when options are omitted", () => {
       const result = routePreToolUse(
         "WebFetch",
         { url: "https://example.com" },
@@ -466,8 +482,8 @@ describe("routePreToolUse", () => {
         "main-webfetch-default-options",
       );
       expect(result).not.toBeNull();
-      expect(result!.action).toBe("deny");
-      expect(result!.reason).toContain("ctx_fetch_and_index");
+      expect(result!.action).toBe("context");
+      expect(result!.additionalContext).toContain("ctx_fetch_and_index");
     });
 
     it("Claude Code pretooluse treats subagent hook payloads as ctx_* unavailable (#794)", async () => {
@@ -477,8 +493,7 @@ describe("routePreToolUse", () => {
         session_id: "core-routing-main-webfetch",
       });
       expect(main.status).toBe(0);
-      expect(main.parsed?.hookSpecificOutput?.permissionDecision).toBe("deny");
-      expect(main.parsed?.hookSpecificOutput?.permissionDecisionReason).toContain("ctx_fetch_and_index");
+      expect(main.parsed?.hookSpecificOutput?.additionalContext).toContain("ctx_fetch_and_index");
 
       const subagent = await spawnPreToolUseHook({
         tool_name: "WebFetch",

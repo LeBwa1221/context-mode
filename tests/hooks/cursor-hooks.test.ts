@@ -107,7 +107,10 @@ describe("Cursor hooks", () => {
       expect(payload.updated_input).toBeTruthy();
     });
 
-    test("blocks WebFetch with a readable reason", () => {
+    // WebFetch was downgraded from a hard deny to an advisory (#927/#1006/
+    // #984/#1037) - it's now allowed through, with a periodic nudge toward
+    // the sandbox instead of a block.
+    test("nudges WebFetch toward the sandbox without blocking it", () => {
       const result = runHook("pretooluse.mjs", {
         tool_name: "WebFetch",
         tool_input: { url: "https://example.com" },
@@ -117,11 +120,12 @@ describe("Cursor hooks", () => {
 
       expect(result.exitCode).toBe(0);
       const payload = JSON.parse(result.stdout) as Record<string, unknown>;
-      expect(payload.permission).toBe("deny");
-      expect(String(payload.user_message)).toContain("WebFetch redirected");
+      expect(payload.permission).toBeUndefined();
+      expect(String(payload.agent_message)).toContain("fetch_and_index");
+      expect(String(payload.agent_message)).toContain("WebFetch still works");
     });
 
-    test("blocks mcp_web_fetch with the same sandbox redirect", () => {
+    test("nudges mcp_web_fetch toward the same sandbox redirect", () => {
       const result = runHook("pretooluse.mjs", {
         tool_name: "mcp_web_fetch",
         tool_input: { url: "https://example.com" },
@@ -131,13 +135,12 @@ describe("Cursor hooks", () => {
 
       expect(result.exitCode).toBe(0);
       const payload = JSON.parse(result.stdout) as Record<string, unknown>;
-      expect(payload.permission).toBe("deny");
-      expect(String(payload.user_message)).toContain("WebFetch redirected");
-      expect(String(payload.user_message)).toContain("ctx_fetch_and_index");
-      expect(String(payload.user_message)).toContain("ctx_search");
+      expect(payload.permission).toBeUndefined();
+      expect(String(payload.agent_message)).toContain("ctx_fetch_and_index");
+      expect(String(payload.agent_message)).toContain("ctx_search");
     });
 
-    test("blocks mcp_fetch_tool with the same sandbox redirect", () => {
+    test("nudges mcp_fetch_tool toward the same sandbox redirect", () => {
       const result = runHook("pretooluse.mjs", {
         tool_name: "mcp_fetch_tool",
         tool_input: { url: "https://example.com" },
@@ -147,10 +150,9 @@ describe("Cursor hooks", () => {
 
       expect(result.exitCode).toBe(0);
       const payload = JSON.parse(result.stdout) as Record<string, unknown>;
-      expect(payload.permission).toBe("deny");
-      expect(String(payload.user_message)).toContain("WebFetch redirected");
-      expect(String(payload.user_message)).toContain("ctx_fetch_and_index");
-      expect(String(payload.user_message)).toContain("ctx_search");
+      expect(payload.permission).toBeUndefined();
+      expect(String(payload.agent_message)).toContain("ctx_fetch_and_index");
+      expect(String(payload.agent_message)).toContain("ctx_search");
     });
   });
 
