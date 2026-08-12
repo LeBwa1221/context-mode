@@ -1659,36 +1659,14 @@ server.registerTool(
     },
     description: `Run code in a sandboxed subprocess.${bunNote} Languages: ${langList}.
 
-Think-in-Code — the core philosophy: the bytes your code processes never enter your conversation memory; only what you console.log() does. Reading a 700 KB log directly means 700 KB of your remaining reasoning capacity gets spent on raw bytes. Running code over that same log in this sandbox and printing a 3 KB summary leaves you with 697 KB of capacity for the actual work.
+Only what you console.log() enters your conversation — the code's raw working data stays in the sandbox. Use this instead of Bash when you intend to derive an answer FROM data (filter, count, aggregate, parse, compare) rather than observe a short fixed output.
 
-Concrete shape — analyze 47 source files without reading any of them:
-  ctx_execute(language: "javascript", code: \`
-    const fs = require('fs');
-    const files = fs.readdirSync('src').filter(f => f.endsWith('.ts'));
-    files.forEach(f => {
-      const lines = fs.readFileSync('src/'+f,'utf8').split('\\\\n').length;
-      console.log(f + ': ' + lines + ' lines');
-    });
-  \`)
-  // 47 files analyzed, 15,314 LoC summarized — output ~3.6 KB instead of 47 Read() calls = ~700 KB.
+WHEN NOT: a single short observational command whose output you'll read verbatim (whoami, pwd, git status on a clean tree) — Bash is simpler. File mutations/navigation also stay on Bash. This tool does NOT persist file writes (subprocess FS is discarded) — use Write/Edit for that.
 
-WHEN:
-  - You intend to derive an answer FROM data (filter, count, aggregate, parse, compare, transform) — do the derivation in code and print only the answer
-  - Output shape or size cannot be predicted before execution (recursive finds, repo-wide greps, list endpoints, query results, log scans)
-  - You would otherwise read raw output and then mentally compute — that compute belongs here, in code, where its inputs stay out of your conversation
-  - You need to keep a long-running process alive (dev server, watcher, daemon) — pass \`background: true\` to detach on timeout instead of killing the process
-  - The output may legitimately be large but you only want recall-by-topic later — pass an \`intent\` string; outputs over ~5KB are auto-indexed into the knowledge base and only the section titles + previews come back, retrievable via ctx_search
+background: true keeps a long-running process (dev server, watcher) alive past the timeout instead of killing it.
+intent: a search string — when output exceeds ~5KB it's auto-indexed and you get section titles/previews instead of raw text; follow up with ctx_search.
 
-WHEN NOT:
-  - Single observational command whose entire short output you intend to consume verbatim (whoami, pwd, git status on a clean tree) — Bash is simpler
-  - File mutations (Edit/Write) or navigation (cd/ls) — Bash is the right surface
-  - You already know the output is one short fixed line and you want to read it as-is
-
-RETURNS:
-  Only what your code prints. Wrap risky calls in try/catch — uncaught errors go to stderr and may leak more than intended. When \`intent\` is set and output exceeds the auto-index threshold, the response carries searchable section titles + previews instead of the raw stdout; use ctx_search(queries: [...]) to drill into specific sections.
-
-EXAMPLE: ctx_execute(language: "javascript", code: "const out = require('child_process').execSync('npm test', {encoding:'utf8', stdio:['ignore','pipe','pipe']}); console.log(out.split('\\\\n').filter(l => /(FAIL|✗|×|Error:|Tests +.*(failed|passed))/i.test(l)).slice(0, 60).join('\\\\n'))")
-EXAMPLE: ctx_execute(language: "javascript", code: "const out = require('child_process').execSync('gh issue list --json number,title --limit 100', {encoding:'utf8'}); const hooks = JSON.parse(out).filter(i => /hook|routing/i.test(i.title)); console.log(\`\${hooks.length} hook-related issues\`)")`,
+See the context-mode skill for worked examples.`,
     inputSchema: z.object({
       language: z
         .enum([
@@ -1709,12 +1687,12 @@ EXAMPLE: ctx_execute(language: "javascript", code: "const out = require('child_p
       code: z
         .string()
         .describe(
-          "Source code to execute. Use console.log (JS/TS), print (Python/Ruby/Perl/R), echo (Shell), echo (PHP), fmt.Println (Go), IO.puts (Elixir), or Console.WriteLine (C#) to output a summary to context.",
+          "Source code to execute. Print with console.log (JS/TS), print (Python/Ruby/Perl/R), echo (Shell/PHP), fmt.Println (Go), IO.puts (Elixir), or Console.WriteLine (C#).",
         ),
       timeout: z
         .coerce.number()
         .optional()
-        .describe("Max execution time in ms. When omitted, no server-side timer fires — the MCP host's RPC timeout governs (which is the right layer for this policy). Pass an explicit value for long-running builds (Gradle/Maven/SBT)."),
+        .describe("Max execution time in ms. Omit to use the MCP host's RPC timeout; set explicitly for long-running builds (Gradle/Maven/SBT)."),
       // background: wrapped in coerceBoolean preprocessor so the literal
       // strings "true"/"false" arriving from OpenCode's native plugin
       // bridge (and several LLM providers' tool-call JSON) parse as the
@@ -1724,7 +1702,7 @@ EXAMPLE: ctx_execute(language: "javascript", code: "const out = require('child_p
         .preprocess(coerceBoolean, z.boolean())
         .optional()
         .default(false)
-        .describe("Keep process running after timeout (for servers/daemons). Returns partial output without killing the process. IMPORTANT: Do NOT add setTimeout/self-close timers in background scripts — the process must stay alive until the timeout detaches it. For server+fetch patterns, prefer putting both server and fetch in ONE ctx_execute call instead of using background."),
+        .describe("Keep the process running past the timeout instead of killing it (servers/daemons). Do NOT add self-close timers in background scripts."),
       cwd: z
         .string()
         .optional()
@@ -1733,10 +1711,7 @@ EXAMPLE: ctx_execute(language: "javascript", code: "const out = require('child_p
         .string()
         .optional()
         .describe(
-          "What you're looking for in the output. When provided and output is large (>5KB), " +
-          "indexes output into knowledge base and returns section titles + previews — not full content. " +
-          "Use ctx_search(queries: [...]) to retrieve specific sections. Example: 'failing tests', 'HTTP 500 errors'." +
-          "\n\nTIP: Use specific technical terms, not just concepts. Check 'Searchable terms' in the response for available vocabulary.",
+          "What you're looking for. When output exceeds ~5KB, returns indexed section titles/previews instead of full content — retrieve via ctx_search(queries: [...]).",
         ),
     }),
   },
