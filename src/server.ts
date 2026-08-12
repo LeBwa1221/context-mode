@@ -1009,12 +1009,15 @@ function sanitizeSessionId(raw: string): string {
 }
 
 /**
- * Runtime status — factual only, no speed claims. hasBunRuntime() elsewhere
- * in this file ("3-5x faster") is unsubstantiated for the hook path:
- * tools/bench-hooks.mjs measured Bun SLOWER than Node for every hook type on
- * Windows (see hooks/hook-runtime.mjs). No cross-platform hook data exists,
- * and no data at all exists for server/sandbox throughput, so this reports
- * what's active instead of asserting a win.
+ * Runtime status — factual only, no speed claims. tools/bench-hooks.mjs
+ * measured Bun's per-spawn startup cost on Windows (~140ms more than Node,
+ * likely Defender scanning the unsigned binary — oven-sh/bun#16981/#19155)
+ * as unrecoverable for hooks, which do ~30-40ms of work per invocation and
+ * exit. Bun's engine itself measured ~1.6x faster than Node for sustained
+ * CPU-bound work on the same machine — the deficit is about process-spawn
+ * frequency, not the runtime being generally slower. Hooks spawn a fresh
+ * process per call, so they lose; the long-running MCP server pays the
+ * spawn tax once, but Bun vs Node hasn't been measured there yet.
  */
 function getRuntimeStatusLines(): string[] {
   const isBun = typeof (globalThis as any).Bun !== "undefined";
@@ -1030,7 +1033,7 @@ function getRuntimeStatusLines(): string[] {
     `Server runtime: ${serverRuntime}`,
     `SQLite driver: ${sqliteDriver}`,
     `Bun on PATH: ${bunOnPath ? "yes" : "no"}`,
-    `Hook runtime mode: ${hookMode} (${process.platform === "win32" ? "hooks default to Node on Windows - measured faster than Bun for hook execution, see tools/bench-hooks.mjs" : "override with CONTEXT_MODE_HOOK_RUNTIME=bun|node"})`,
+    `Hook runtime mode: ${hookMode} (${process.platform === "win32" ? "hooks default to Node on Windows - Bun's per-spawn startup cost outweighs its engine speed for these short-lived processes, see tools/bench-hooks.mjs" : "override with CONTEXT_MODE_HOOK_RUNTIME=bun|node"})`,
   ];
 }
 
@@ -1268,9 +1271,6 @@ function checkFilePathDenyPolicy(
 
 // Build description dynamically based on detected runtimes
 const langList = available.join(", ");
-const bunNote = hasBunRuntime()
-  ? " (Bun detected — JS/TS runs 3-5x faster)"
-  : "";
 
 // ─────────────────────────────────────────────────────────
 // Helper: smart snippet extraction — returns windows around
@@ -1683,7 +1683,7 @@ server.registerTool(
       idempotentHint: false,
       openWorldHint: true,
     },
-    description: `Run code in a sandboxed subprocess.${bunNote} Languages: ${langList}.
+    description: `Run code in a sandboxed subprocess. Languages: ${langList}.
 
 Think-in-Code — the core philosophy: the bytes your code processes never enter your conversation memory; only what you console.log() does. Reading a 700 KB log directly means 700 KB of your remaining reasoning capacity gets spent on raw bytes. Running code over that same log in this sandbox and printing a 3 KB summary leaves you with 697 KB of capacity for the actual work.
 
@@ -4995,12 +4995,6 @@ async function main() {
   if (process.stdin.isTTY) {
     console.error(`Context Mode MCP server v${VERSION} running on stdio`);
     console.error(`Detected runtimes:\n${getRuntimeSummary(runtimes)}`);
-    if (!hasBunRuntime()) {
-      console.error(
-        "\nPerformance tip: Install Bun for 3-5x faster JS/TS execution",
-      );
-      console.error("  curl -fsSL https://bun.sh/install | bash");
-    }
   }
 }
 
