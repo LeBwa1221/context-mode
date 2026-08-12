@@ -73,8 +73,6 @@ import { resolveProjectDir } from "./util/project-dir.js";
 import { loadDatabase } from "./db-base.js";
 import { AnalyticsEngine, formatReport, getConversationStats, getContentBytesAllSessions, getConversationWindowStats, getLifetimeStats, getMultiAdapterLifetimeStats, getRealBytesStats, kb } from "./session/analytics.js";
 import { estimateTokens } from "./session/token-estimate.js";
-import { getRoutingBlockMode, createRoutingBlock, createSubagentPointer } from "../hooks/routing-block.mjs";
-import { createToolNamer, KNOWN_PLATFORMS } from "../hooks/core/tool-naming.mjs";
 const __pkg_dir = dirname(fileURLToPath(import.meta.url));
 const VERSION: string = (() => {
   for (const rel of ["../package.json", "./package.json"]) {
@@ -1190,15 +1188,34 @@ interface RoutingOverhead {
  * byte count when the real platform can't be determined) unless
  * CONTEXT_MODE_PLATFORM names a known one.
  */
-function measureRoutingOverhead(): RoutingOverhead {
-  const mode = getRoutingBlockMode();
-  const platform = KNOWN_PLATFORMS.includes(process.env.CONTEXT_MODE_PLATFORM ?? "")
-    ? (process.env.CONTEXT_MODE_PLATFORM as string)
-    : "claude-code";
-  const t = createToolNamer(platform);
-  const bytes = createRoutingBlock(t, { mode }).length;
-  const subagentPointerBytes = createSubagentPointer(t, { toolSearchBootstrap: true }).length;
-  return { mode, bytes, subagentPointerBytes };
+async function measureRoutingOverhead(): Promise<RoutingOverhead> {
+  try {
+    // Dynamic import, not a static one: these are plain-JS hook modules
+    // under hooks/, outside tsconfig's rootDir("./src") and NodeNext
+    // moduleResolution won't accept an ambient .d.ts shim for a relative
+    // .mjs specifier (verified against tsc directly — TS7016 either way).
+    // `cli.ts` already carries this exact pattern for the same reason
+    // (see normalizeHooksJsonOnly / rewriteShellSnapshots imports there).
+    const routingBlock = (await import("../hooks/routing-block.mjs" as any)) as {
+      getRoutingBlockMode: () => string;
+      createRoutingBlock: (t: (bareTool: string) => string, opts?: { mode?: string; includeCommands?: boolean; toolSearchBootstrap?: boolean }) => string;
+      createSubagentPointer: (t: (bareTool: string) => string, opts?: { toolSearchBootstrap?: boolean }) => string;
+    };
+    const toolNaming = (await import("../hooks/core/tool-naming.mjs" as any)) as {
+      createToolNamer: (platform: string) => (bareTool: string) => string;
+      KNOWN_PLATFORMS: string[];
+    };
+    const mode = routingBlock.getRoutingBlockMode();
+    const platform = toolNaming.KNOWN_PLATFORMS.includes(process.env.CONTEXT_MODE_PLATFORM ?? "")
+      ? (process.env.CONTEXT_MODE_PLATFORM as string)
+      : "claude-code";
+    const t = toolNaming.createToolNamer(platform);
+    const bytes = routingBlock.createRoutingBlock(t, { mode }).length;
+    const subagentPointerBytes = routingBlock.createSubagentPointer(t, { toolSearchBootstrap: true }).length;
+    return { mode, bytes, subagentPointerBytes };
+  } catch {
+    return { mode: "unknown", bytes: 0, subagentPointerBytes: 0 };
+  }
 }
 
 /** gross bytes kept out this session, using the same #1025 dedupe fix as persistStats(). */
@@ -1234,7 +1251,7 @@ async function computeNetSavings(): Promise<{
 }> {
   const { keptOut } = computeGrossKeptOutBytes();
   const schemaBytes = await measureLiveSchemaBytes();
-  const routing = measureRoutingOverhead();
+  const routing = await measureRoutingOverhead();
   const overheadBytes = schemaBytes + routing.bytes;
   const netBytes = keptOut - overheadBytes;
   const netTokens = estimateTokens(Math.max(0, netBytes));
