@@ -19,7 +19,7 @@
  * @see https://github.com/mksglu/context-mode/issues/203
  */
 
-import { existsSync, copyFileSync, renameSync, unlinkSync } from "node:fs";
+import { existsSync, copyFileSync, renameSync, unlinkSync, statSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -127,7 +127,28 @@ function probeNativeInProcess(pluginRoot) {
   }
 }
 
+/**
+ * Is the active binary already the one the ABI cache holds? Cheap stat-only
+ * check (two syscalls) to avoid re-copying a ~2MB native binary on every
+ * hook invocation when nothing changed since the last sync (#: this repo's
+ * profiling — see tools/bench-hooks.mjs — found ensureNativeCompat running
+ * unconditionally on every PreToolUse/PostToolUse call, including hooks that
+ * never touch SQLite). mtime-based: a copy always bumps the destination's
+ * mtime to "now", so binaryPath's mtime staying >= abiCachePath's mtime means
+ * no newer cache write has happened since the last sync.
+ */
+function alreadySynced(abiCachePath, binaryPath) {
+  try {
+    const src = statSync(abiCachePath);
+    const dst = statSync(binaryPath);
+    return dst.mtimeMs >= src.mtimeMs && dst.size === src.size;
+  } catch {
+    return false;
+  }
+}
+
 function replaceActiveNativeBinaryFromCache(abiCachePath, binaryPath) {
+  if (alreadySynced(abiCachePath, binaryPath)) return;
   const tmpPath = `${binaryPath}.staging-${process.pid}-${Date.now()}`;
   try {
     copyFileSync(abiCachePath, tmpPath);
