@@ -1,76 +1,36 @@
 /**
  * Slice 3 — `renderCostExample` helper
  *
- * Section 4 of the 5-section narrative ("For example: what would that
- * cost?") translates lifetime tokens into a relatable Opus dollar figure
- * + alternate-model scale row + tangible comparisons (Cursor Pro months,
- * Claude Max months, weekends of API coding) + 10-dev team scale, all
- * capped with an EXAMPLES disclaimer so users never confuse it for an
- * actual bill.
+ * Section 4 of the 5-section narrative ("What that adds up to"). Used to
+ * translate lifetime tokens into a dollar figure at a hardcoded per-token
+ * rate. Net-savings rework dropped that entirely: a dollar figure derived
+ * from an unmeasured /4 token guess, priced at a hardcoded rate, was three
+ * assumptions deep and got read as fact. This now reports bytes (measured)
+ * and a labeled token estimate only -- no dollar sign anywhere.
  *
- * The Mert-approved demo (target output, /Users/mksglu/.../target.txt):
- *
- *   context-mode kept 356.0 MB (93.3M tokens) out of your AI's context.
- *   If those tokens had hit Opus 4 ($15 per 1M input):
- *
- *     $1399.73  on Opus 4 input alone
- *
- *   That's roughly:
- *     · 70 months of Cursor Pro ($20/mo)
- *     · 7.0 months of Claude Max ($200/mo)
- *     · 19 weekends of nonstop API coding
- *
- *   At a 10-dev team scale: ~$13997 over 67 days, or ~$76254/year.
- *
- *   Different model? Math scales:
- *     Sonnet 4  $279.95  ·  GPT-4o $233.29  ·  Gemini 2 $116.64  ·  Haiku 4 $74.65
- *
- *   These are EXAMPLES, not your actual bill — your model and rates may differ.
- *
- * Contract: pure (lifetimeBytes, lifetimeTokens, lifetimeDays) → string[]
- * with no IO. The byte → MB and token → M format match `kb()` / `fmtNum()`
- * already defined in analytics.ts.
+ * Contract: pure (lifetimeBytes, lifetimeTokens, lifetimeDays) -> string[]
+ * with no IO. The byte -> MB format matches `kb()` already defined in
+ * analytics.ts.
  */
 
 import { describe, expect, test } from "vitest";
 import { renderCostExample } from "../../src/session/analytics.js";
 
 describe("renderCostExample", () => {
-  // Canonical fixture: 356 MB / 93.3M tokens / 67 days → $466.58 on Opus 4.7.
-  // Token count back-solved against the *old* Opus 4 $15/1M rate ($1399.73)
-  // and kept stable so the byte/token narrative still reads cleanly. With
-  // the 2026-06 Opus 4.7/4.8 rate of $5/1M, the same token count emits
-  // $466.58 (3× lower because the per-token rate dropped 3×):
-  //   466.58 USD = tokens × 5 / 1e6  →  tokens = 93_315_333
-  // Lifetime byte total stays at 356 MB even though the implied byte/token
-  // ratio (3.81) doesn't match — the helper's only job is to render what
-  // the caller passes, not to derive bytes from tokens.
   const LIFETIME_BYTES  = 356 * 1024 * 1024;
   const LIFETIME_TOKENS = 93_315_333;
   const LIFETIME_DAYS   = 67;
 
-  test("emits the headline byte/token tally + Opus 4.7 dollar figure", () => {
+  test("emits the headline byte/token tally with no dollar sign", () => {
     const text = renderCostExample(LIFETIME_BYTES, LIFETIME_TOKENS, LIFETIME_DAYS).join("\n");
-    // Updated 2026-06: Opus 4.7/4.8 rate is $5/1M (was $15/1M for Opus 4),
-    // so 93,315,333 tokens → $466.58 (was $1399.73 at the old rate).
-    expect(text).toMatch(/\$466\.58 of Opus 4\.7 tokens your team didn't burn/);
+    expect(text).toMatch(/356 MB kept out of context, lifetime/);
+    expect(text).toMatch(/93\.3M tokens est\./);
+    expect(text).not.toMatch(/\$/);
   });
 
-  test("mentions Cursor Pro paid for itself", () => {
+  test("labels the token figure as an estimate, not a measurement", () => {
     const text = renderCostExample(LIFETIME_BYTES, LIFETIME_TOKENS, LIFETIME_DAYS).join("\n");
-    expect(text).toMatch(/Cursor Pro paid for itself/);
-  });
-
-  test("includes the 10-dev team scale projection", () => {
-    const text = renderCostExample(LIFETIME_BYTES, LIFETIME_TOKENS, LIFETIME_DAYS).join("\n");
-    expect(text).toMatch(/Scale across a 10-dev team/);
-    expect(text).toMatch(/\$[\d,]+\/year saved/);
-  });
-
-  test("ends with the EXAMPLES disclaimer", () => {
-    const text = renderCostExample(LIFETIME_BYTES, LIFETIME_TOKENS, LIFETIME_DAYS).join("\n");
-    expect(text).toMatch(/Opus rates shown for context/);
-    expect(text).toMatch(/savings ratio holds/);
+    expect(text).toMatch(/estimate/i);
   });
 
   test("returns [] when lifetime tokens is zero", () => {

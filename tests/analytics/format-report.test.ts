@@ -129,7 +129,7 @@ describe("formatReport", () => {
       });
       const output = formatReport(report, "1.0.71");
 
-      expect(output).toContain("tokens saved");
+      expect(output).toContain("tokens est.");
       expect(output).toContain("reduction");
       expect(output).toContain("v1.0.71");
     });
@@ -572,8 +572,8 @@ describe("formatReport", () => {
       });
       const output = formatReport(report, "1.0.71");
 
-      // Hero metric: tokens saved with percentage
-      expect(output).toMatch(/6\.\d+M tokens saved/);
+      // Hero metric: kept-out bytes + a labeled token estimate
+      expect(output).toMatch(/6\.\dM tokens est\./);
       expect(output).toContain("reduction");
       expect(output).toContain("5h 6m");
 
@@ -653,7 +653,7 @@ describe("formatReport", () => {
       const lines = output.split("\n");
 
       // Line 0: Hero metric
-      expect(lines[0]).toMatch(/tokens saved\s+·\s+.*reduction\s+·\s+5h 6m/);
+      expect(lines[0]).toMatch(/tokens est\.\s+·\s+.*reduction\s+·\s+5h 6m/);
 
       // Lines 2-3: Before/After bars
       expect(lines[2]).toMatch(/Without context-mode\s+\|█+\|\s+\d/);
@@ -841,10 +841,18 @@ describe("v1.0.148 Bug G — Section 1 bar uses strict-compression formula", () 
 // PR-B — Issue #2 (lifetime monotonic) + Issue #3 (PO copy)
 // ─────────────────────────────────────────────────────────
 
+// Parses fmtNum()-style strings ("134.1K", "6.7M", "1,234") back to a number.
+function parseTokenStr(s: string): number {
+  const n = parseFloat(s.replace(/,/g, ""));
+  if (s.endsWith("M")) return n * 1_000_000;
+  if (s.endsWith("K")) return n * 1_000;
+  return n;
+}
+
 describe("PR-B: stats UX fixes", () => {
   describe("[Issue #2] lifetime ≥ session (monotonic)", () => {
     it("footer: lifetime ≥ session when no prior LifetimeStats provided", () => {
-      // Fresh user, first session, real savings — lifetime must NOT show $0.
+      // Fresh user, first session, real savings — lifetime must NOT show 0.
       const report = makeReport({
         savings: {
           ...makeReport().savings,
@@ -856,17 +864,17 @@ describe("PR-B: stats UX fixes", () => {
       });
       const output = formatReport(report, "1.0.108");
 
-      // Footer pattern: "$X.XX this session  ·  $Y.YY lifetime"
-      const footer = output.match(/\$(\d+\.\d{2})\s+this session\s+·\s+\$(\d+\.\d{2})\s+lifetime/);
+      // Footer pattern: "~X tokens est. this session  ·  ~Y tokens est. lifetime"
+      const footer = output.match(/~([\d,.KM]+) tokens est\. this session\s+·\s+~([\d,.KM]+) tokens est\. lifetime/);
       expect(footer).toBeTruthy();
-      const sessionUsd = parseFloat(footer![1]);
-      const lifetimeUsd = parseFloat(footer![2]);
+      const sessionTokens = parseTokenStr(footer![1]);
+      const lifetimeTokens = parseTokenStr(footer![2]);
 
-      expect(sessionUsd).toBeGreaterThan(0);
-      expect(lifetimeUsd).toBeGreaterThanOrEqual(sessionUsd);
+      expect(sessionTokens).toBeGreaterThan(0);
+      expect(lifetimeTokens).toBeGreaterThanOrEqual(sessionTokens);
     });
 
-    it("mid-table: 'saved lifetime' line ≥ session $", () => {
+    it("mid-table: 'saved lifetime' line ≥ session tokens", () => {
       const report = makeReport({
         savings: {
           ...makeReport().savings,
@@ -878,15 +886,15 @@ describe("PR-B: stats UX fixes", () => {
       });
       const output = formatReport(report, "1.0.108");
 
-      const sessionMatch = output.match(/\$(\d+\.\d{2})\s+this session/);
-      const midTableMatch = output.match(/~\$(\d+\.\d{2})\s+saved lifetime/);
+      const sessionMatch = output.match(/~([\d,.KM]+) tokens est\. this session/);
+      const midTableMatch = output.match(/~([\d,.KM]+) tokens est\. saved lifetime/);
 
       expect(sessionMatch).toBeTruthy();
       expect(midTableMatch).toBeTruthy();
-      const sessionUsd = parseFloat(sessionMatch![1]);
-      const lifetimeUsd = parseFloat(midTableMatch![1]);
+      const sessionTokens = parseTokenStr(sessionMatch![1]);
+      const lifetimeTokens = parseTokenStr(midTableMatch![1]);
 
-      expect(lifetimeUsd).toBeGreaterThanOrEqual(sessionUsd);
+      expect(lifetimeTokens).toBeGreaterThanOrEqual(sessionTokens);
     });
 
     it("when prior lifetime > session, both render distinct values (footer)", () => {
@@ -909,12 +917,12 @@ describe("PR-B: stats UX fixes", () => {
         },
       });
 
-      const footer = output.match(/\$(\d+\.\d{2})\s+this session\s+·\s+\$(\d+\.\d{2})\s+lifetime/);
+      const footer = output.match(/~([\d,.KM]+) tokens est\. this session\s+·\s+~([\d,.KM]+) tokens est\. lifetime/);
       expect(footer).toBeTruthy();
-      const sessionUsd = parseFloat(footer![1]);
-      const lifetimeUsd = parseFloat(footer![2]);
+      const sessionTokens = parseTokenStr(footer![1]);
+      const lifetimeTokens = parseTokenStr(footer![2]);
 
-      expect(lifetimeUsd).toBeGreaterThan(sessionUsd);
+      expect(lifetimeTokens).toBeGreaterThan(sessionTokens);
     });
   });
 

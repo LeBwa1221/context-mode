@@ -1107,8 +1107,8 @@ function persistStats(): void {
       // dollars_saved_session/lifetime were removed (v3): a dollar figure
       // derived from an unmeasured token estimate at a hardcoded fallback
       // price was three assumptions deep and got read as fact. Bytes and
-      // estimated tokens above are the honest units; pricePerToken() stays
-      // exported for callers that explicitly want to do that math themselves.
+      // estimated tokens above are the honest units; pricePerToken() was
+      // removed with the rest of the dollar-conversion code path.
       by_tool: Object.fromEntries(
         Object.keys({ ...sessionStats.calls, ...sessionStats.bytesReturned }).map(
           (t) => [
