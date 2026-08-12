@@ -2206,25 +2206,11 @@ server.registerTool(
       idempotentHint: false,
       openWorldHint: false,
     },
-    description: `Store content in a searchable knowledge base (BM25 over FTS5). Splits markdown by headings, keeps code blocks intact, and persists the raw chunks. The full content stays in storage — retrieve any section on-demand via ctx_search; nothing is summarized or truncated.
+    description: `Store content in a searchable knowledge base (BM25 over FTS5). Splits markdown by headings, keeps code blocks intact. Full content stays in storage — retrieve any section later via ctx_search(source: "<label>"); nothing is summarized or truncated.
 
-WHEN:
-  - Documentation from Context7, Skills, or MCP tools (API docs, framework guides, code examples)
-  - API references (endpoint details, parameter specs, response schemas)
-  - MCP tools/list output (exact tool signatures and descriptions)
-  - Skill prompts and instructions that are too large to keep verbatim in conversation
-  - README files, migration guides, changelog entries
-  - Any content with code examples you may need to reference precisely later
+Use for docs, API references, README/changelog content, or anything you'll want to query precisely later. NOT for log/test/CSV/build output — use ctx_execute_file instead, which processes in-sandbox without persisting bytes.
 
-WHEN NOT:
-  - Log files, test output, CSV, or build output — use ctx_execute_file, which processes in-sandbox without persisting bytes
-  - Single-use ephemeral content you will not query later — keep it inline if it fits, or ctx_execute_file it
-
-RETURNS:
-  Indexing metadata: chunk counts (total, code-bearing), source label, and the exact ctx_search call shape to query the indexed content. Raw content is NOT echoed back — it lives in storage, retrievable via ctx_search(source: "<label>"). When \`path\` is provided, a content hash is stored so ctx_search results auto-flag staleness on future calls.
-
-EXAMPLE: ctx_index(content: "# React useEffect\\n\\nThe Effect Hook lets you ...", source: "react-useeffect-docs")
-EXAMPLE: ctx_index(path: "/path/to/large-spec.md", source: "openapi-v2-spec")`,
+\`path\` reads server-side (content never enters context) and stores a hash so ctx_search flags staleness if the file changes later.`,
     inputSchema: z.object({
       content: z
         .string()
