@@ -22,7 +22,7 @@
 import { runHook } from "./run-hook.mjs";
 
 await runHook(async () => {
-  const { createRoutingBlock } = await import("./routing-block.mjs");
+  const { createRoutingBlock, getRoutingBlockMode } = await import("./routing-block.mjs");
   const { createToolNamer } = await import("./core/tool-naming.mjs");
   const { detectPlatformFromEnv } = await import("./core/platform-detect.mjs");
   const { buildAutoInjection } = await import("./auto-injection.mjs");
@@ -46,7 +46,10 @@ await runHook(async () => {
 
   const detectedPlatform = detectPlatformFromEnv();
   const toolNamer = createToolNamer(detectedPlatform);
-  const ROUTING_BLOCK = createRoutingBlock(toolNamer);
+  // #967/#1031: CONTEXT_MODE_ROUTING_BLOCK=off|short|full, default "short" -
+  // see hooks/routing-block.mjs. Paid once per session, so the default is
+  // the compact form; set to "full" to restore the original verbose block.
+  const ROUTING_BLOCK = createRoutingBlock(toolNamer, { mode: getRoutingBlockMode() });
 
   // Resolve absolute path for imports (fileURLToPath for Windows compat)
   const HOOK_DIR = dirname(fileURLToPath(import.meta.url));

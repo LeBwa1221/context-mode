@@ -66,10 +66,7 @@ export function buildCtxSearchInputSchema(isSharedMode: boolean) {
           .string()
           .optional()
           .describe(
-            "Project scope. " +
-              "Default (omit): this session's project — auto-resolved from the host adapter. " +
-              "'global': span every project in the shared store (cross-project recall). " +
-              "<absolute-path>: scope to that specific project directory.",
+            "Project scope. Omit for this session's project. 'global' spans every project in the shared store. Or pass an absolute project path.",
           ),
       }
     : ({} as Record<string, never>);
