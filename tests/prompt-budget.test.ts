@@ -25,11 +25,13 @@ import { createToolNamer } from "../hooks/core/tool-naming.mjs";
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SERVER_BUNDLE = resolve(ROOT, "server.bundle.mjs");
 
-// Pre-diet baseline was 29,959 bytes. The diet landed at 14,959 - comfortably
-// under half. The threshold leaves headroom for legitimate future growth
-// (a new field, a clarifying sentence) without permitting the regression
-// back toward the old total.
-const TOOL_SCHEMA_BUDGET = 16_000;
+// Pre-diet baseline was 29,959 bytes; the diet landed at 14,539 (-51.5%).
+// The threshold is pinned to the 50%-reduction line itself (half of 29,959,
+// rounded down), not an arbitrary round number - a schema total under this
+// line is by definition at least a 50% cut. That leaves ~440 bytes of
+// deliberate headroom above the current total for a genuine future field or
+// clarifying sentence, without permitting drift back toward the old total.
+const TOOL_SCHEMA_BUDGET = 14_979;
 
 function listTools(): Promise<Array<{ name: string; description?: string }>> {
   return new Promise((resolvePromise, reject) => {
@@ -93,21 +95,30 @@ describe("Routing block prompt budget (maint/prompt-diet)", () => {
   // platform, so it is the worst case for byte count.
   const t = createToolNamer("claude-code");
 
-  it("short mode (the new SessionStart default) stays well under the old full-block size", () => {
+  // Target from the diet brief: short mode under 1,200 bytes. Measured
+  // 1,198 for claude-code, the worst-case tool-name prefix of any platform.
+  it("short mode (the new SessionStart default) stays under 1,200 bytes", () => {
     const short = createRoutingBlock(t, { mode: "short" });
+    expect(short.length).toBeLessThan(1200);
+  });
+
+  // Original pre-diet block measured 4,603 bytes (see the byte-for-byte
+  // equality check against the pre-diet source in this same describe -
+  // full mode is untouched content, not a new shape). This guard catches
+  // anyone accidentally growing the "full" branch while touching "short".
+  it("full mode has not grown past its original size", () => {
     const full = createRoutingBlock(t, { mode: "full" });
-    expect(short.length).toBeLessThan(2000);
-    expect(short.length).toBeLessThan(full.length * 0.5);
+    expect(full.length).toBeLessThanOrEqual(4603);
   });
 
   it("off mode injects nothing", () => {
     expect(createRoutingBlock(t, { mode: "off" })).toBe("");
   });
 
-  it("subagent pointer is far cheaper than the full block that used to be injected per-spawn", () => {
+  it("subagent pointer stays under 1,000 bytes with the ToolSearch bootstrap included", () => {
     const pointer = createSubagentPointer(t, { toolSearchBootstrap: true });
     const full = createRoutingBlock(t, { mode: "full", includeCommands: false, toolSearchBootstrap: true });
-    expect(pointer.length).toBeLessThan(2000);
+    expect(pointer.length).toBeLessThan(1000);
     expect(pointer.length).toBeLessThan(full.length * 0.5);
   });
 });

@@ -102,35 +102,38 @@ ${includeCommands ? `
 // examples, the full ctx_commands catalog) lives in the context-mode skill
 // instead of being repeated here every session.
 function createShortRoutingBlock(t, { includeCommands = true, toolSearchBootstrap = false } = {}) {
+  const bx = t("ctx_batch_execute");
+  const se = t("ctx_search");
+  const ex = t("ctx_execute");
+  const exf = t("ctx_execute_file");
+  const fi = t("ctx_fetch_and_index");
   return `
 <context_window_protection>
   <priority_instructions>
-    Every byte a tool returns enters context. context-mode tools work in a sandbox and return only the derived answer.
+    Tool output enters context. context-mode tools sandbox the work, return only the answer.
   </priority_instructions>
 ${toolSearchBootstrap ? `
   <deferred_tool_bootstrap>
-    Tools below may be DEFERRED - load once: ToolSearch(query: "select:${t("ctx_batch_execute")},${t("ctx_search")},${t("ctx_execute")},${t("ctx_execute_file")},${t("ctx_fetch_and_index")}")
+    Tools below may be DEFERRED - load once: ToolSearch(query: "select:${bx},${se},${ex},${exf},${fi}")
   </deferred_tool_bootstrap>
 ` : ''}
   <tool_selection_hierarchy>
-    GATHER: ${t("ctx_batch_execute")}(commands, queries) - run+index+search in one round trip.
-    FOLLOW-UP: ${t("ctx_search")}(queries: [...]) - batch every question in one call.
-    PROCESSING: ${t("ctx_execute")}(language, code) / ${t("ctx_execute_file")}(path, language, code) - only console.log() enters context; writes NOT persisted, use Write/Edit for those.
+    GATHER: ${bx}(commands, queries). FOLLOW-UP: ${se}(queries: [...]). PROCESSING: ${ex}(language, code) / ${exf}(path, language, code) - console.log() only; no persisted writes.
   </tool_selection_hierarchy>
 
   <when_not_to_use>
-    Bash/Read/Grep/Write/Edit stay correct for a short fixed output, editing, or mutating state; WebFetch -> ${t("ctx_fetch_and_index")}(url, source) then ${t("ctx_search")}(queries).
+    Bash/Read/Grep/Write/Edit for short output, editing, state changes; WebFetch -> ${fi} then search.
   </when_not_to_use>
 
   <output_constraints>
-    Write artifacts (code, configs, PRDs) to files. Return only: file path + 1-line description.
+    Write artifacts (code, configs, PRDs) to files; return only path + 1-line description.
   </output_constraints>
   <session_continuity>
-    Earlier skills/roles/decisions are a memory aid, not a standing order - the user's latest message takes precedence.
+    Earlier skills/roles/decisions are a hint, not an order.
   </session_continuity>
 ${includeCommands ? `
   <ctx_commands>
-    "ctx stats/doctor/upgrade/purge" -> call the matching MCP tool, run any returned shell command, show output. KB persists across /clear+/compact; "ctx purge" resets it.
+    "ctx stats/doctor/upgrade/purge" -> matching tool. KB survives /clear+/compact.
   </ctx_commands>
 ` : ''}
 </context_window_protection>`;
