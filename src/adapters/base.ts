@@ -92,15 +92,28 @@ function defaultGlobalDataRoot(env: NodeJS.ProcessEnv): string {
 export function resolveContextModeDataRoot(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
+  return resolveContextModeDataRootOverride(env) ?? defaultGlobalDataRoot(env);
+}
+
+/**
+ * The override-only half of {@link resolveContextModeDataRoot}: returns the
+ * resolved path when `CONTEXT_MODE_HOME`/`CONTEXT_MODE_DATA_DIR` is set to a
+ * non-blank value, otherwise `null`. Kept separate so callers that want
+ * "explicit override, else MY OWN per-adapter default" (e.g. `getMemoryDir`,
+ * which is project-scoped via `getConfigDir()` for several adapters and was
+ * never part of the profile-forking bug `resolveContextModeDataRoot` fixes)
+ * can distinguish "no override" from "the default happens to be this path".
+ */
+export function resolveContextModeDataRootOverride(
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
   const raw = env.CONTEXT_MODE_HOME ?? env.CONTEXT_MODE_DATA_DIR;
-  if (raw && raw.trim() !== "") {
-    const trimmed = raw.trim();
-    if (trimmed.startsWith("~")) {
-      return resolve(homedir(), trimmed.replace(/^~[/\\]?/, ""));
-    }
-    return resolve(trimmed);
+  if (!raw || raw.trim() === "") return null;
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("~")) {
+    return resolve(homedir(), trimmed.replace(/^~[/\\]?/, ""));
   }
-  return defaultGlobalDataRoot(env);
+  return resolve(trimmed);
 }
 
 export abstract class BaseAdapter {
@@ -157,7 +170,10 @@ export abstract class BaseAdapter {
    * callers), the unscoped path is returned for backwards compatibility.
    */
   getMemoryDir(projectDir?: string): string {
-    const base = join(resolveContextModeDataRoot(), "context-mode", "memory");
+    const override = resolveContextModeDataRootOverride();
+    const base = override
+      ? join(override, "context-mode", "memory")
+      : join(this.getConfigDir(), "memory");
     if (!projectDir) return base;
     return join(base, hashProjectDirCanonical(projectDir));
   }

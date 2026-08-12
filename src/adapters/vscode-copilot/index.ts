@@ -21,7 +21,7 @@ import { resolve, join } from "node:path";
 import { homedir } from "node:os";
 
 import { CopilotBaseAdapter } from "../copilot-base.js";
-import { resolveContextModeDataRoot } from "../base.js";
+import { resolveContextModeDataRootOverride } from "../base.js";
 import type { CopilotHookInput, CopilotHookModule } from "../copilot-base.js";
 
 import type {
@@ -90,7 +90,7 @@ export class VSCodeCopilotAdapter extends CopilotBaseAdapter {
     // dir and the ~/.vscode fallback so dev-container/CI users can pin
     // storage to a writable volume regardless of whether a .github tree
     // happens to exist in cwd.
-    const override = resolveContextModeDataRoot();
+    const override = resolveContextModeDataRootOverride();
     if (override) {
       const overrideDir = join(override, "context-mode", "sessions");
       mkdirSync(overrideDir, { recursive: true });

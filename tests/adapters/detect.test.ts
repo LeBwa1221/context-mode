@@ -612,14 +612,17 @@ describe("getAdapter", () => {
     expect(adapter).not.toBeInstanceOf(ClaudeCodeAdapter);
   });
 
-  it("clientInfo 'Pi CLI' resolves sessionsDir to ~/.pi/ (end-to-end)", async () => {
+  // maint/global-store: session storage is global by default (see
+  // resolveContextModeDataRoot, src/adapters/base.ts) — no longer rooted
+  // under ~/.pi, but the "never ~/.claude" invariant still holds since the
+  // shared root isn't platform-rooted either.
+  it("clientInfo 'Pi CLI' resolves sessionsDir to the shared context-mode data root (end-to-end)", async () => {
     // Reproduces the exact server.ts:3402-3404 path:
     //   const clientInfo = server.server.getClientVersion();
     //   const signal = detectPlatform(clientInfo ?? undefined);
     //   _detectedAdapter = await getAdapter(signal.platform);
     // Pi MCP bridge sends clientInfo.name="Pi CLI" per
-    // src/adapters/client-map.ts:25; the resulting sessionsDir MUST
-    // live under ~/.pi, NEVER under ~/.claude.
+    // src/adapters/client-map.ts:25.
     const signal = detectPlatform({ name: "Pi CLI", version: "0.73.0" });
     expect(signal.platform).toBe("pi");
 
@@ -627,17 +630,15 @@ describe("getAdapter", () => {
     expect(adapter).toBeInstanceOf(PiAdapter);
 
     const sessionsDir = adapter.getSessionDir();
-    expect(sessionsDir).toContain(".pi");
     expect(sessionsDir).not.toContain(".claude");
-    expect(sessionsDir.endsWith(`${sep}.pi${sep}context-mode${sep}sessions`)).toBe(true);
+    expect(sessionsDir.endsWith(`${sep}context-mode${sep}sessions`)).toBe(true);
   });
 
-  it("clientInfo 'Pi Coding Agent' resolves sessionsDir to ~/.pi/", async () => {
+  it("clientInfo 'Pi Coding Agent' resolves sessionsDir to the shared context-mode data root", async () => {
     // Second alias from src/adapters/client-map.ts:26.
     const signal = detectPlatform({ name: "Pi Coding Agent", version: "1.0" });
     expect(signal.platform).toBe("pi");
     const adapter = await getAdapter(signal.platform);
-    expect(adapter.getSessionDir()).toContain(".pi");
     expect(adapter.getSessionDir()).not.toContain(".claude");
   });
 

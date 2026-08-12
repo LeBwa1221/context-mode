@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { KiroAdapter } from "../../src/adapters/kiro/index.js";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 import { hashProjectDirCanonical, resolveSessionDbPath } from "../../src/session/db.js";
 import {
   PRE_TOOL_USE_MATCHER_PATTERN,
@@ -247,23 +248,22 @@ describe("KiroAdapter", () => {
       );
     });
 
-    it("session dir is under ~/.kiro/context-mode/sessions/", () => {
+    // maint/global-store: session storage is global by default.
+    it("session dir is under the shared context-mode data root", () => {
       const sessionDir = adapter.getSessionDir();
       expect(sessionDir).toBe(
-        join(homedir(), ".kiro", "context-mode", "sessions"),
+        join(resolveContextModeDataRoot(), "context-mode", "sessions"),
       );
     });
 
     // C2 narrowing: per-project DB path is computed by callers via
-    // resolveSessionDbPath + adapter.getSessionDir(). Test pins that the
-    // composition lands the file inside Kiro's sessionDir (~/.kiro/...).
+    // resolveSessionDbPath + adapter.getSessionDir().
     it("session DB path contains project hash", () => {
       const dbPath = resolveSessionDbPath({
         projectDir: "/test/project",
         sessionsDir: adapter.getSessionDir(),
       });
       expect(dbPath).toMatch(/[a-f0-9]{16}\.db$/);
-      expect(dbPath).toContain(".kiro");
     });
 
     it("session events path contains project hash with -events.md suffix", () => {
@@ -273,7 +273,6 @@ describe("KiroAdapter", () => {
         `${hashProjectDirCanonical("/test/project")}-events.md`,
       );
       expect(eventsPath).toMatch(/[a-f0-9]{16}-events\.md$/);
-      expect(eventsPath).toContain(".kiro");
     });
   });
 

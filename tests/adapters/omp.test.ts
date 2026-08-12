@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { OMPAdapter } from "../../src/adapters/omp/index.js";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 import { hashProjectDirCanonical, resolveSessionDbPath } from "../../src/session/db.js";
 
 describe("OMPAdapter", () => {
@@ -126,23 +127,24 @@ describe("OMPAdapter", () => {
   // ~/.claude/, regardless of which harness installed context-mode.
 
   describe("config paths", () => {
-    it("session dir is under ~/.omp/context-mode/sessions/", () => {
+    // maint/global-store: session storage is global by default — no longer
+    // rooted under ~/.omp, but the #473 invariant (never ~/.claude) still
+    // holds since the shared root isn't platform-rooted either.
+    it("session dir is under the shared context-mode data root", () => {
       expect(adapter.getSessionDir()).toBe(
-        join(homedir(), ".omp", "context-mode", "sessions"),
+        join(resolveContextModeDataRoot(), "context-mode", "sessions"),
       );
     });
 
-    it("session DB path contains project hash and lives under .omp", () => {
+    it("session DB path contains project hash and never lands under .claude", () => {
       const dbPath = resolveSessionDbPath({ projectDir: "/test/project", sessionsDir: adapter.getSessionDir() });
       expect(dbPath).toMatch(/[a-f0-9]{16}\.db$/);
-      expect(dbPath).toContain(".omp");
       expect(dbPath).not.toContain(".claude");
     });
 
-    it("session events path contains project hash and lives under .omp", () => {
+    it("session events path contains project hash and never lands under .claude", () => {
       const eventsPath = join(adapter.getSessionDir(), `${hashProjectDirCanonical("/test/project")}-events.md`);
       expect(eventsPath).toMatch(/[a-f0-9]{16}-events\.md$/);
-      expect(eventsPath).toContain(".omp");
       expect(eventsPath).not.toContain(".claude");
     });
 

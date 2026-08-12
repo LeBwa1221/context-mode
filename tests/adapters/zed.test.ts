@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { ZedAdapter } from "../../src/adapters/zed/index.js";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 
 describe("ZedAdapter", () => {
   let adapter: ZedAdapter;
@@ -118,10 +119,11 @@ describe("ZedAdapter", () => {
       );
     });
 
-    it("session dir is under ~/.config/zed/context-mode/sessions/", () => {
+    // maint/global-store: session storage is global by default.
+    it("session dir is under the shared context-mode data root", () => {
       const sessionDir = adapter.getSessionDir();
       expect(sessionDir).toBe(
-        join(homedir(), ".config", "zed", "context-mode", "sessions"),
+        join(resolveContextModeDataRoot(), "context-mode", "sessions"),
       );
     });
   });

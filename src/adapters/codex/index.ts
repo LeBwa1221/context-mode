@@ -27,7 +27,7 @@ import {
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { BaseAdapter, resolveContextModeDataRoot } from "../base.js";
+import { BaseAdapter, resolveContextModeDataRootOverride } from "../base.js";
 import { hashProjectDirCanonical } from "../../session/db.js";
 import { resolveCodexConfigDir } from "./paths.js";
 
@@ -443,11 +443,12 @@ export class CodexAdapter extends BaseAdapter implements HookAdapter {
   }
 
   getSessionDir(): string {
-    // Issue #649: honor CONTEXT_MODE_DATA_DIR universal storage override
-    // before falling back to the $CODEX_HOME-rooted default. Settings.toml
-    // and hooks.json continue to live under getConfigDir() so the Codex CLI
-    // sees its own config in the expected place.
-    const override = resolveContextModeDataRoot();
+    // Issue #649: honor the context-mode data-root override before falling
+    // back to the $CODEX_HOME-rooted default (preserved so CODEX_HOME
+    // continues to steer session storage the way it always has — parity
+    // with the copilot-cli/kimi/opencode adapters). Settings.toml and
+    // hooks.json continue to live under getConfigDir() unaffected.
+    const override = resolveContextModeDataRootOverride();
     const dir = override
       ? join(override, "context-mode", "sessions")
       : join(this.getConfigDir(), "context-mode", "sessions");
@@ -475,7 +476,7 @@ export class CodexAdapter extends BaseAdapter implements HookAdapter {
     // unset. Under the override, layout is `<DATA_DIR>/context-mode/memories`.
     // Issue #663: scope by projectDir hash so parallel projects can't
     // read each other's memory.
-    const override = resolveContextModeDataRoot();
+    const override = resolveContextModeDataRootOverride();
     const base = override
       ? join(override, "context-mode", "memories")
       : join(this.getConfigDir(), "memories");

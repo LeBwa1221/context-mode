@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { QwenCodeAdapter } from "../../src/adapters/qwen-code/index.js";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 import { hashProjectDirCanonical, resolveSessionDbPath } from "../../src/session/db.js";
 import { fakeHome, realHome } from "../setup-home";
 
@@ -143,10 +144,11 @@ describe("QwenCodeAdapter", () => {
       expect(settingsPath).not.toContain(".claude");
     });
 
-    it("session dir is under ~/.qwen/context-mode/sessions/", () => {
+    // maint/global-store: session storage is global by default.
+    it("session dir is under the shared context-mode data root", () => {
       const sessionDir = adapter.getSessionDir();
       expect(sessionDir).toBe(
-        join(homedir(), ".qwen", "context-mode", "sessions"),
+        join(resolveContextModeDataRoot(), "context-mode", "sessions"),
       );
     });
 
@@ -166,7 +168,7 @@ describe("QwenCodeAdapter", () => {
         sessionsDir: adapter.getSessionDir(),
       });
       expect(dbPath).toBe(
-        join(homedir(), ".qwen", "context-mode", "sessions", `${hash}.db`),
+        join(resolveContextModeDataRoot(), "context-mode", "sessions", `${hash}.db`),
       );
     });
   });

@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { OpenClawAdapter } from "../../src/adapters/openclaw/index.js";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 import { hashProjectDirCanonical, resolveSessionDbPath } from "../../src/session/db.js";
 
 describe("OpenClawAdapter", () => {
@@ -269,16 +270,16 @@ describe("OpenClawAdapter", () => {
       expect(adapter.getSettingsPath()).toBe(resolve("openclaw.json"));
     });
 
-    it("session dir is under ~/.openclaw/context-mode/sessions/", () => {
+    // maint/global-store: session storage is global by default.
+    it("session dir is under the shared context-mode data root", () => {
       const sessionDir = adapter.getSessionDir();
       expect(sessionDir).toBe(
-        join(homedir(), ".openclaw", "context-mode", "sessions"),
+        join(resolveContextModeDataRoot(), "context-mode", "sessions"),
       );
     });
 
     it("session DB path includes project hash", () => {
       const dbPath = resolveSessionDbPath({ projectDir: "/test/project", sessionsDir: adapter.getSessionDir() });
-      expect(dbPath).toContain(".openclaw");
       expect(dbPath).toContain("context-mode");
       expect(dbPath).toContain("sessions");
       expect(dbPath).toMatch(/\.db$/);
@@ -286,7 +287,6 @@ describe("OpenClawAdapter", () => {
 
     it("session events path includes project hash", () => {
       const eventsPath = join(adapter.getSessionDir(), `${hashProjectDirCanonical("/test/project")}-events.md`);
-      expect(eventsPath).toContain(".openclaw");
       expect(eventsPath).toMatch(/-events\.md$/);
     });
   });

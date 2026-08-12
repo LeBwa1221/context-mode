@@ -23,7 +23,7 @@ import { dirname, join, resolve } from "node:path";
 
 import { CopilotBaseAdapter } from "../copilot-base.js";
 import type { CopilotHookInput, CopilotHookModule } from "../copilot-base.js";
-import { resolveContextModeDataRoot } from "../base.js";
+import { resolveContextModeDataRootOverride } from "../base.js";
 import { parseJsonc } from "../../util/jsonc.js";
 import type {
   DiagnosticResult,
@@ -169,7 +169,7 @@ export class CopilotCliAdapter extends CopilotBaseAdapter {
     // (COPILOT_OPTS configDirEnv: "COPILOT_HOME") writes them. Without this, a
     // relocated COPILOT_HOME splits hook writes ($COPILOT_HOME/...) from server
     // reads (~/.copilot/...) and sessions appear empty/orphaned.
-    const override = resolveContextModeDataRoot();
+    const override = resolveContextModeDataRootOverride();
     const dir = override
       ? join(override, "context-mode", "sessions")
       : join(this.getConfigDir(), "context-mode", "sessions");

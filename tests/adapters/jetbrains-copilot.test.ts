@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { homedir } from "node:os";
 import { resolve, join } from "node:path";
 import { JetBrainsCopilotAdapter } from "../../src/adapters/jetbrains-copilot/index.js";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 import { HOOK_TYPES, HOOK_SCRIPTS, buildHookCommand } from "../../src/adapters/jetbrains-copilot/hooks.js";
 import { hashProjectDirCanonical, resolveSessionDbPath } from "../../src/session/db.js";
 
@@ -53,11 +54,13 @@ describe("JetBrainsCopilotAdapter", () => {
   // ── getSessionDir ─────────────────────────────────────
 
   describe("getSessionDir", () => {
-    it("returns path under ~/.config/JetBrains/context-mode/sessions", () => {
+    // maint/global-store: session storage is global by default, no longer
+    // rooted under the platform's own config dir (~/.config/JetBrains).
+    it("returns a path under the shared context-mode data root", () => {
       const sessionDir = adapter.getSessionDir();
-      expect(sessionDir).toContain("JetBrains");
-      expect(sessionDir).toContain("context-mode");
-      expect(sessionDir).toContain("sessions");
+      expect(sessionDir).toBe(
+        join(resolveContextModeDataRoot(), "context-mode", "sessions"),
+      );
     });
   });
 

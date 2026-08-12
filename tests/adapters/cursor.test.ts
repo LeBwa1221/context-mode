@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { CursorAdapter } from "../../src/adapters/cursor/index.js";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 
 /**
  * Helpers for the "cursor doctor — plugin install detection" suite.
@@ -189,9 +190,10 @@ describe("CursorAdapter", () => {
       expect(adapter.getSettingsPath()).toBe(resolve(".cursor", "hooks.json"));
     });
 
-    it("uses a dedicated Cursor session dir", () => {
+    // maint/global-store: session storage is global by default.
+    it("uses the shared context-mode data root for sessions", () => {
       expect(adapter.getSessionDir()).toBe(
-        join(homedir(), ".cursor", "context-mode", "sessions"),
+        join(resolveContextModeDataRoot(), "context-mode", "sessions"),
       );
     });
   });

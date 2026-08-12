@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { PiAdapter } from "../../src/adapters/pi/index.js";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 import { ClaudeCodeAdapter } from "../../src/adapters/claude-code/index.js";
 import { getAdapter, getSessionDirSegments } from "../../src/adapters/detect.js";
 import { hashProjectDirCanonical, resolveSessionDbPath } from "../../src/session/db.js";
@@ -54,36 +55,37 @@ describe("PiAdapter — Pi platform adapter", () => {
       expect(a).not.toBeInstanceOf(ClaudeCodeAdapter);
     });
 
-    it("returned adapter writes session dir under ~/.pi/, not ~/.claude/", async () => {
+    // maint/global-store: session storage is global by default — no longer
+    // rooted under ~/.pi, but the #473 invariant (never ~/.claude) still
+    // holds since the shared root isn't platform-rooted either.
+    it("returned adapter writes session dir to the shared root, not ~/.claude/", async () => {
       const a = await getAdapter("pi");
       const dir = a.getSessionDir();
-      expect(dir).toContain(".pi");
+      expect(dir).toBe(join(resolveContextModeDataRoot(), "context-mode", "sessions"));
       expect(dir).not.toContain(".claude");
     });
   });
 
-  // ── Config paths — data isolation under ~/.pi/ ─────────
+  // ── Config paths — data isolation from ~/.claude/ ──────
   // The OMP fix mirror for issue #473 — verify Pi data NEVER bleeds
   // into ~/.claude/ regardless of which harness installed context-mode.
 
   describe("config paths", () => {
-    it("session dir is under ~/.pi/context-mode/sessions/", () => {
+    it("session dir is under the shared context-mode data root", () => {
       expect(adapter.getSessionDir()).toBe(
-        join(homedir(), ".pi", "context-mode", "sessions"),
+        join(resolveContextModeDataRoot(), "context-mode", "sessions"),
       );
     });
 
-    it("session DB path contains project hash and lives under .pi", () => {
+    it("session DB path contains project hash and never lands under .claude", () => {
       const dbPath = resolveSessionDbPath({ projectDir: "/test/project", sessionsDir: adapter.getSessionDir() });
       expect(dbPath).toMatch(/[a-f0-9]{16}\.db$/);
-      expect(dbPath).toContain(".pi");
       expect(dbPath).not.toContain(".claude");
     });
 
-    it("session events path contains project hash and lives under .pi", () => {
+    it("session events path contains project hash and never lands under .claude", () => {
       const eventsPath = join(adapter.getSessionDir(), `${hashProjectDirCanonical("/test/project")}-events.md`);
       expect(eventsPath).toMatch(/[a-f0-9]{16}-events\.md$/);
-      expect(eventsPath).toContain(".pi");
       expect(eventsPath).not.toContain(".claude");
     });
 

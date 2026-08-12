@@ -31,7 +31,6 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -242,15 +241,12 @@ const configSchema = {
 // ── Helpers ───────────────────────────────────────────────
 
 function getSessionDir(): string {
-  // Issue #649: honor CONTEXT_MODE_DATA_DIR universal storage override
-  // ahead of the hardcoded ~/.openclaw root so dev-container/CI/NFS-home
-  // users can relocate context-mode storage without patching the source.
-  // Kept in sync with OpenClawAdapter.getSessionDir() (inherited from
-  // BaseAdapter) — both call sites must agree byte-for-byte.
-  const override = resolveContextModeDataRoot();
-  const dir = override
-    ? join(override, "context-mode", "sessions")
-    : join(homedir(), ".openclaw", "context-mode", "sessions");
+  // maint/global-store: resolveContextModeDataRoot() is global-by-default
+  // now (no longer null when unset), so this mirrors BaseAdapter's default
+  // exactly. Kept in sync with OpenClawAdapter.getSessionDir() (inherited
+  // from BaseAdapter, not overridden) — both call sites must agree
+  // byte-for-byte.
+  const dir = join(resolveContextModeDataRoot(), "context-mode", "sessions");
   mkdirSync(dir, { recursive: true });
   return dir;
 }

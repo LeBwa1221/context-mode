@@ -27,7 +27,7 @@ import {
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { BaseAdapter, resolveContextModeDataRoot } from "../base.js";
+import { BaseAdapter, resolveContextModeDataRootOverride } from "../base.js";
 import { hashProjectDirCanonical } from "../../session/db.js";
 import { resolveKimiConfigDir } from "./paths.js";
 
@@ -338,7 +338,7 @@ export class KimiAdapter extends BaseAdapter implements HookAdapter {
   }
 
   getSessionDir(): string {
-    const override = resolveContextModeDataRoot();
+    const override = resolveContextModeDataRootOverride();
     const dir = override
       ? join(override, "context-mode", "sessions")
       : join(this.getConfigDir(), "context-mode", "sessions");
@@ -351,7 +351,7 @@ export class KimiAdapter extends BaseAdapter implements HookAdapter {
   }
 
   getMemoryDir(projectDir?: string): string {
-    const override = resolveContextModeDataRoot();
+    const override = resolveContextModeDataRootOverride();
     const base = override
       ? join(override, "context-mode", "memory")
       : join(this.getConfigDir(), "memory");

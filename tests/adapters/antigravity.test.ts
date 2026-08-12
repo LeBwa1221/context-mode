@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { AntigravityAdapter } from "../../src/adapters/antigravity/index.js";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 import {
   AntigravityCliAdapter,
   antigravityCliHooksPath,
@@ -133,23 +134,24 @@ describe("AntigravityAdapter", () => {
       );
     });
 
-    it("session dir is under ~/.gemini/context-mode/sessions/", () => {
+    // maint/global-store: session storage is global by default (see
+    // resolveContextModeDataRoot, src/adapters/base.ts) — no longer
+    // profile/platform-rooted under ~/.gemini.
+    it("session dir is under the shared context-mode data root", () => {
       const sessionDir = adapter.getSessionDir();
       expect(sessionDir).toBe(
-        join(homedir(), ".gemini", "context-mode", "sessions"),
+        join(resolveContextModeDataRoot(), "context-mode", "sessions"),
       );
     });
 
     it("session DB path contains project hash", () => {
       const dbPath = resolveSessionDbPath({ projectDir: "/test/project", sessionsDir: adapter.getSessionDir() });
       expect(dbPath).toMatch(/[a-f0-9]{16}\.db$/);
-      expect(dbPath).toContain(".gemini");
     });
 
     it("session events path contains project hash with -events.md suffix", () => {
       const eventsPath = join(adapter.getSessionDir(), `${hashProjectDirCanonical("/test/project")}-events.md`);
       expect(eventsPath).toMatch(/[a-f0-9]{16}-events\.md$/);
-      expect(eventsPath).toContain(".gemini");
     });
   });
 

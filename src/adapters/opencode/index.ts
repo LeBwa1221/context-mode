@@ -28,7 +28,7 @@ import {
 import { resolve, join } from "node:path";
 import { homedir } from "node:os";
 
-import { BaseAdapter, resolveContextModeDataRoot } from "../base.js";
+import { BaseAdapter, resolveContextModeDataRootOverride } from "../base.js";
 import { stripJsonComments } from "../../util/jsonc.js";
 
 import type {
@@ -276,7 +276,7 @@ export class OpenCodeAdapter extends BaseAdapter implements HookAdapter {
     // ahead of OpenCode/Kilo's XDG-rooted default. opencode.json + plugin
     // discovery stay under getConfigDir() so OpenCode itself sees its own
     // config in the expected location.
-    const override = resolveContextModeDataRoot();
+    const override = resolveContextModeDataRootOverride();
     const dir = override
       ? join(override, "context-mode", "sessions")
       : join(this.getConfigDir(), "context-mode", "sessions");

@@ -2,7 +2,7 @@ import "../setup-home";
 import { afterEach, beforeEach, describe, it, expect } from "vitest";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { BaseAdapter } from "../../src/adapters/base.js";
+import { BaseAdapter, resolveContextModeDataRoot } from "../../src/adapters/base.js";
 import { hashProjectDirCanonical } from "../../src/session/db.js";
 
 /**
@@ -87,10 +87,10 @@ describe("BaseAdapter — CONTEXT_MODE_DATA_DIR override (#649)", () => {
     );
   });
 
-  it("getSessionDir falls back to <home>/<segments>/context-mode/sessions when env unset", () => {
+  it("getSessionDir falls back to the shared global data root when env unset (maint/global-store)", () => {
     const adapter = new TestAdapter([".pi"]);
     expect(adapter.getSessionDir()).toBe(
-      join(homedir(), ".pi", "context-mode", "sessions"),
+      join(resolveContextModeDataRoot(), "context-mode", "sessions"),
     );
   });
 
@@ -98,7 +98,7 @@ describe("BaseAdapter — CONTEXT_MODE_DATA_DIR override (#649)", () => {
     const adapter = new TestAdapter([".gemini"]);
     process.env[ENV_KEY] = "   ";
     expect(adapter.getSessionDir()).toBe(
-      join(homedir(), ".gemini", "context-mode", "sessions"),
+      join(resolveContextModeDataRoot(), "context-mode", "sessions"),
     );
   });
 

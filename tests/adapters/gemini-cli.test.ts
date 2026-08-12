@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { GeminiCLIAdapter } from "../../src/adapters/gemini-cli/index.js";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 import {
   HOOK_TYPES,
   HOOK_SCRIPTS,
@@ -198,10 +199,11 @@ describe("GeminiCLIAdapter", () => {
       );
     });
 
-    it("session dir is under ~/.gemini/context-mode/sessions/", () => {
+    // maint/global-store: session storage is global by default.
+    it("session dir is under the shared context-mode data root", () => {
       const sessionDir = adapter.getSessionDir();
       expect(sessionDir).toBe(
-        join(homedir(), ".gemini", "context-mode", "sessions"),
+        join(resolveContextModeDataRoot(), "context-mode", "sessions"),
       );
     });
   });
