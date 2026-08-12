@@ -150,6 +150,25 @@ await runHook(async () => {
       // Old version dirs are cleaned lazily by sessionstart.mjs (age-gated >1h)
       // to avoid breaking active sessions that still reference them (#181).
 
+      // ─── Hook spawn runtime: rewrite hooks.json's `node` -> `bun` when the
+      // resolved runtime says to (see hooks/hook-runtime.mjs for the policy).
+      // Marker-gated with everything else in this block, so the cost (a bun
+      // probe + a JSON rewrite) is paid at most once per plugin version, not
+      // per hook call.
+      try {
+        const { resolveHookSpawnRuntime } = await import("./hook-runtime.mjs");
+        const runtime = resolveHookSpawnRuntime();
+        if (runtime.isBun) {
+          const { normalizeHooksJsonOnly } = await import("./normalize-hooks.mjs");
+          normalizeHooksJsonOnly({
+            pluginRoot: targetDir,
+            nodePath: process.execPath,
+            jsRuntimePath: runtime.path,
+            platform: process.platform,
+          });
+        }
+      } catch { /* best effort — hooks.json stays on node */ }
+
       writeFileSync(marker, Date.now().toString(), "utf-8");
     }
   } catch { /* best effort — don't block hook */ }
