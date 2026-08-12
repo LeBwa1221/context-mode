@@ -17,6 +17,13 @@ import { loadDatabase as loadDatabaseImpl } from "../db-base.js";
 import { ensureSessionEventsSchema } from "./db.js";
 import { resolveClaudeConfigDir } from "../util/claude-config.js";
 import { resolveContextModeDataRoot } from "../adapters/base.js";
+import { estimateTokens } from "./token-estimate.js";
+
+/** Clamp a percentage into [0, 100] — a savings ratio must never report above 100%. */
+function clampPct(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(100, n));
+}
 
 function semverNewer(a: string, b: string): boolean {
   const pa = a.split(".").map(Number);
@@ -457,7 +464,7 @@ export class AnalyticsEngine {
       tool,
       calls: runtimeStats.calls[tool] || 0,
       context_kb: Math.round((runtimeStats.bytesReturned[tool] || 0) / 1024 * 10) / 10,
-      tokens: Math.round((runtimeStats.bytesReturned[tool] || 0) / 4),
+      tokens: estimateTokens(runtimeStats.bytesReturned[tool] || 0),
     }));
 
     const uptimeMs = Date.now() - runtimeStats.sessionStart;
@@ -1463,7 +1470,7 @@ export function getRealBytesStats(opts: {
   // eventDataBytes and snapshotBytes are analytics/resume infrastructure —
   // they never enter the model context window (ADR-0004 rationale for the
   // Section 1 bar) — so they are excluded from the savings estimate too.
-  const totalSavedTokens = Math.floor(bytesAvoided / 4);
+  const totalSavedTokens = estimateTokens(bytesAvoided);
 
   return { eventDataBytes, bytesAvoided, bytesReturned, snapshotBytes, contentBytes, totalSavedTokens };
 }
@@ -1509,7 +1516,7 @@ export function getConversationWindowStats(opts: {
     bytesReturned: mine.bytesReturned,
     snapshotBytes: mine.snapshotBytes,
     contentBytes: mine.contentBytes,
-    totalSavedTokens: Math.floor(mine.bytesAvoided / 4),
+    totalSavedTokens: estimateTokens(mine.bytesAvoided),
   };
 }
 
@@ -1839,7 +1846,7 @@ export function getMultiAdapterRealBytesStats(opts?: {
     sum.snapshotBytes  += one.snapshotBytes;
   }
   // Honest-savings fix: only recorded redirects count (see getRealBytesStats).
-  sum.totalSavedTokens = Math.floor(sum.bytesAvoided / 4);
+  sum.totalSavedTokens = estimateTokens(sum.bytesAvoided);
 
   return { ...sum, perAdapter };
 }
@@ -2186,13 +2193,13 @@ function renderNarrative5Section(args: {
 
   // ── Token math (same monotonic-growth invariant as the legacy branch).
   const convEventsTokens = conversation.events * TOKENS_PER_EVENT;
-  const convRescueTokens = Math.round((conversation.snapshotBytes ?? 0) / 4);
+  const convRescueTokens = estimateTokens(conversation.snapshotBytes ?? 0);
   const convLegacyTokens = convEventsTokens + convRescueTokens;
   const convRealTokens   = realBytes?.conversation?.totalSavedTokens ?? 0;
   const conversationTokens = Math.max(convLegacyTokens, convRealTokens);
 
   const lifetimeEventsTokens = (lifetime?.totalEvents ?? 0) * TOKENS_PER_EVENT;
-  const lifetimeRescueTokens = Math.round((lifetime?.rescueBytes ?? 0) / 4);
+  const lifetimeRescueTokens = estimateTokens(lifetime?.rescueBytes ?? 0);
   const lifetimeLegacyTokens = lifetimeEventsTokens + lifetimeRescueTokens;
   // Lifetime "with"/"without" — measured when available, else legacy fallback.
   // Honest definition (matches conversation bar below):
@@ -2205,10 +2212,10 @@ function renderNarrative5Section(args: {
   const lifeAv  = realBytes?.lifetime?.bytesAvoided  ?? 0;
   const hasMeasured = (lifeRet + lifeAv) > 0;
   const lifetimeTokensWithout = hasMeasured
-    ? Math.max(1, Math.floor((lifeRet + lifeAv) / 4))
+    ? Math.max(1, estimateTokens(lifeRet + lifeAv))
     : lifetimeLegacyTokens;
   const lifetimeTokensWith = hasMeasured
-    ? Math.max(1, Math.floor(lifeRet / 4))
+    ? Math.max(1, estimateTokens(lifeRet))
     : Math.max(1, Math.round(lifetimeTokensWithout * 0.02));
 
   // Bytes from realBytes when present, else derive from tokens (×4 — same
@@ -2217,9 +2224,14 @@ function renderNarrative5Section(args: {
   const lifetimeBytes = (multiAdapter?.totalBytes && multiAdapter.totalBytes > 0)
     ? multiAdapter.totalBytes
     : lifetimeTokensWithout * 4;
-  const convBytes = realBytes?.conversation
+  const convBytesRaw = realBytes?.conversation
     ? (realBytes.conversation.eventDataBytes + realBytes.conversation.bytesAvoided + realBytes.conversation.snapshotBytes)
     : conversationTokens * 4;
+  // #950: per-chat is a subset of the lifetime aggregate — it must never be
+  // reported larger than the all-projects total. Only clamp when the
+  // lifetime figure is itself known (>0); a fresh disk aggregate reporting 0
+  // must not zero out a real per-chat number.
+  const convBytes = lifetimeBytes > 0 ? Math.min(convBytesRaw, lifetimeBytes) : convBytesRaw;
 
   // ── Days alive of THE CONVERSATION (section 1).
   const convDays = conversation.daysAlive >= 1
@@ -2323,15 +2335,17 @@ function renderNarrative5Section(args: {
   } else {
     const convBytesWithout  = measuredAvoided + measuredReturned;
     const convBytesWith     = Math.max(1, measuredReturned);
-    const convTokensWithout = Math.max(1, Math.floor(convBytesWithout / 4));
-    const convTokensWith    = Math.max(1, Math.floor(convBytesWith    / 4));
+    const convTokensWithout = Math.max(1, estimateTokens(convBytesWithout));
+    const convTokensWith    = Math.max(1, estimateTokens(convBytesWith));
     const withoutBar = dataBar(convTokensWithout, convTokensWithout, 32);
     const withBar    = dataBar(convTokensWith,    convTokensWithout, 32);
-    const convPct    = (1 - convTokensWith / convTokensWithout) * 100;
+    const convPct    = clampPct((1 - convTokensWith / convTokensWithout) * 100);
     const convMult   = Math.max(1, Math.round(convTokensWithout / convTokensWith));
     out.push(`  Without context-mode  ${kb(convBytesWithout).padStart(8)}  ${withoutBar}   ${fmtNum(convTokensWithout).padStart(7)} tokens`);
     out.push(`  With context-mode     ${kb(convBytesWith).padStart(8)}  ${withBar}   ${fmtNum(convTokensWith).padStart(7)} tokens`);
-    out.push(`                          ${convPct.toFixed(1)}% kept out of context · your AI ran ${convMult}× longer before /compact fired`);
+    // #1023: this is a byte ratio (window usage without vs with), not a time
+    // measurement — do not phrase it as "ran longer".
+    out.push(`                          ${convPct.toFixed(1)}% kept out of context · window usage cut ${convMult}x`);
     out.push("");
   }
 
@@ -2857,7 +2871,7 @@ function renderConversation(c: ConversationStats, conversationUsd: string, contr
   out.push(`  This conversation contributed ${conversationUsd}  ·  ${pctStr}`);
   out.push(`  ${c.events.toLocaleString("en-US")} events  ·  ${daysStr} alive`);
   if (c.snapshotsConsumed > 0 && c.snapshotBytes > 0) {
-    const rescuedTokens = Math.round(c.snapshotBytes / 4);
+    const rescuedTokens = estimateTokens(c.snapshotBytes);
     out.push(`  ${c.snapshotsConsumed} compact weathered  ·  ${fmtNum(rescuedTokens)} tokens rescued from a ${(c.snapshotBytes / 1024).toFixed(0)} KB snapshot`);
   }
   out.push("");
@@ -3071,8 +3085,8 @@ export function formatReport(
   const totalReturned = report.savings.total_bytes_returned;
   const totalCalls = report.savings.total_calls;
   const grandTotal = totalKeptOut + totalReturned;
-  const savingsPct = grandTotal > 0 ? (totalKeptOut / grandTotal) * 100 : 0;
-  const tokensSaved = Math.round(totalKeptOut / 4);
+  const savingsPct = grandTotal > 0 ? clampPct((totalKeptOut / grandTotal) * 100) : 0;
+  const tokensSaved = estimateTokens(totalKeptOut);
   const ratioMultiplier = totalReturned > 0
     ? Math.max(1, Math.round(grandTotal / Math.max(totalReturned, 1)))
     : 0;

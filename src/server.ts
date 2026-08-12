@@ -72,6 +72,7 @@ import { resolveClaudeConfigDir } from "./util/claude-config.js";
 import { resolveProjectDir } from "./util/project-dir.js";
 import { loadDatabase } from "./db-base.js";
 import { AnalyticsEngine, formatReport, getConversationStats, getContentBytesAllSessions, getConversationWindowStats, getLifetimeStats, getMultiAdapterLifetimeStats, getRealBytesStats, pricePerToken } from "./session/analytics.js";
+import { estimateTokens } from "./session/token-estimate.js";
 const __pkg_dir = dirname(fileURLToPath(import.meta.url));
 const VERSION: string = (() => {
   for (const rel of ["../package.json", "./package.json"]) {
@@ -1067,7 +1068,7 @@ function persistStats(): void {
       totalProcessed > 0
         ? Math.round((1 - totalReturned / totalProcessed) * 100)
         : 0;
-    const tokensSaved = Math.round(keptOut / 4);
+    const tokensSaved = estimateTokens(keptOut);
 
     // Lifetime savings — cached separately because getLifetimeStats() scans
     // disk (per-project SessionDBs + auto-memory dirs) and is too expensive
@@ -3900,8 +3901,8 @@ function patchPiLifetimeFromStatsFiles(lifetime: ReturnType<typeof getLifetimeSt
     }
   } catch { /* never block ctx_stats on stats file I/O */ }
   if (sandboxedBytes > 0) {
-    const rescueTokens = (lifetime.rescueBytes ?? 0) / 4;
-    lifetime.totalEvents = Math.round((sandboxedBytes / 4 + rescueTokens) / 256);
+    const rescueTokens = estimateTokens(lifetime.rescueBytes ?? 0);
+    lifetime.totalEvents = Math.round((estimateTokens(sandboxedBytes) + rescueTokens) / 256);
   }
 }
 
@@ -4064,7 +4065,7 @@ server.registerTool(
               const lifeReal = {
                 ...lifeRealBase,
                 contentBytes: lifeRealBase.contentBytes + lifeContentBytes,
-                totalSavedTokens: Math.floor(lifeRealBase.bytesAvoided / 4),
+                totalSavedTokens: estimateTokens(lifeRealBase.bytesAvoided),
               };
               realBytes = { conversation: convReal, lifetime: lifeReal };
             }
