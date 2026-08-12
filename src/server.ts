@@ -3354,27 +3354,13 @@ server.registerTool(
       idempotentHint: false,
       openWorldHint: true,
     },
-    description: `Fetches URL content, converts HTML to markdown (JSON is chunked by key paths, plain text indexed directly), persists it in a searchable knowledge base, and returns a small preview window per source. The raw page bytes never enter your conversation — they live in storage and you retrieve any section on-demand via ctx_search.
+    description: `Fetches URL content (HTML->markdown, JSON chunked by key paths, plain text as-is), persists it in a searchable knowledge base, and returns a small preview window per source. Raw page bytes never enter your conversation — retrieve any section later via ctx_search(source: "<label>").
 
-Caching: every fetch is cached on disk and reused for repeat calls within the TTL window. The default TTL is 24 hours; override per-call with the \`ttl\` parameter (milliseconds, \`ttl: 0\` bypasses cache like \`force: true\`). Stored content older than 14 days is cleaned up on startup.
+Cached on disk, default TTL 24h; override with \`ttl\` (ms, \`ttl: 0\` bypasses cache like \`force: true\`).
 
-WHEN:
-  - You need web content (docs, changelogs, API references, spec pages) and the raw page bytes should NOT enter your conversation
-  - Multi-URL research (library evaluation, migration scans, doc comparisons): pass the \`requests\` array and a \`concurrency\` value 2-8 for parallel I/O
-  - You want repeat lookups against the same URL to be cheap (TTL cache hits return only a hint, no re-fetch)
-  - You want a long-lived cache window (override \`ttl\` upward for stable specs) or a guaranteed-fresh fetch (\`ttl: 0\` or \`force: true\`)
+For multi-URL research pass \`requests: [{url, source?}, ...]\` with \`concurrency\` 2-8 for parallel I/O (fetch phase only; indexing is always serial).
 
-WHEN NOT:
-  - You already have the content locally — store it via the inline index tool
-  - The page is SPA-rendered (JavaScript-required to materialize content) — this is a plain HTTP fetch, no headless browser
-
-RETURNS:
-  Per-source preview windows extracted around indexable headings plus indexing metadata (chunk counts, source labels, cache state). Raw content is NOT echoed back — retrieve any section on-demand via ctx_search(source: "<label>"). Concurrency parallelizes the fetch phase up to your chosen value (capped by the host's logical CPU count); the FTS5 write phase always runs serially because SQLite is a single-writer store. Net latency = max(fetch latency across the pool) + sum(per-source index write time). Cache hits skip both phases and return a small freshness hint instead of re-fetching. Use 4-8 for stable I/O-bound batches; lower the value when the target host enforces a per-IP rate limit you cannot raise.
-
-EXAMPLE: ctx_fetch_and_index(
-  requests: [{url: "https://react.dev/...", source: "react"}, {url: "https://vuejs.org/...", source: "vue"}],
-  concurrency: 5
-)`,
+WHEN NOT: content is already local (use ctx_index) or the page is SPA-rendered (this is a plain HTTP fetch, no headless browser).`,
     inputSchema: z.object({
       url: z.string().optional().describe("Single URL to fetch and index (legacy single-shape)"),
       source: z
@@ -3406,10 +3392,7 @@ EXAMPLE: ctx_fetch_and_index(
         .optional()
         .default(1)
         .describe(
-          "Max URLs to fetch in parallel (1-8, default: 1). " +
-          "Use 4-8 for I/O-bound multi-URL batches (library docs, changelogs, pricing pages). " +
-          "Capped by os.cpus().length on small machines (response notes when capped). " +
-          "Indexing is always serial regardless — only fetches race.",
+          "Max URLs to fetch in parallel (1-8, default: 1). Use 4-8 for I/O-bound multi-URL batches; capped by CPU count on small machines. Indexing is always serial.",
         ),
       force: z
         .preprocess(coerceBoolean, z.boolean())
