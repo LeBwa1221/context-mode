@@ -1173,7 +1173,7 @@ async function measureLiveSchemaBytes(): Promise<number> {
 }
 
 /** Overhead the current session actually paid for the SessionStart routing block. */
-interface RoutingOverhead {
+export interface RoutingOverhead {
   mode: string;
   bytes: number;
   /** Bytes re-injected on EACH subagent spawn — a rate, not a total (spawn count isn't tracked). */
@@ -1238,7 +1238,7 @@ function computeGrossKeptOutBytes(): { keptOut: number; totalReturned: number } 
 // savings as "% of window" the way the team-lead brief did (~2.1% of 200K).
 const CONTEXT_WINDOW_TOKENS = 200_000;
 
-async function computeNetSavings(): Promise<{
+export interface NetSavings {
   grossBytes: number;
   grossTokens: number;
   overheadBytes: number;
@@ -1248,28 +1248,48 @@ async function computeNetSavings(): Promise<{
   netTokens: number;
   netPctOfWindow: number;
   breakEvenReached: boolean;
-}> {
-  const { keptOut } = computeGrossKeptOutBytes();
-  const schemaBytes = await measureLiveSchemaBytes();
-  const routing = await measureRoutingOverhead();
-  const overheadBytes = schemaBytes + routing.bytes;
-  const netBytes = keptOut - overheadBytes;
+}
+
+/**
+ * Pure math core of the net-savings calculation, split out from
+ * computeNetSavings() so the invariants (never claim savings with zero
+ * gross bytes, net can go negative, break-even is gross >= overhead) are
+ * unit-testable without spawning the MCP server or mocking a live
+ * tools/list round trip. computeNetSavings() is the only caller in
+ * production; it supplies grossBytes/overheadBytes from LIVE measurements
+ * (session byte counters + the running server's own tools/list payload).
+ */
+export function computeNetSavingsFromBytes(
+  grossBytes: number,
+  overheadBytes: number,
+  schemaBytes: number,
+  routing: RoutingOverhead,
+): NetSavings {
+  const netBytes = grossBytes - overheadBytes;
   const netTokens = estimateTokens(Math.max(0, netBytes));
   return {
-    grossBytes: keptOut,
-    grossTokens: estimateTokens(keptOut),
+    grossBytes,
+    grossTokens: estimateTokens(grossBytes),
     overheadBytes,
     schemaBytes,
     routing,
     netBytes,
     netTokens,
     netPctOfWindow: (netTokens / CONTEXT_WINDOW_TOKENS) * 100,
-    breakEvenReached: keptOut >= overheadBytes,
+    breakEvenReached: grossBytes >= overheadBytes,
   };
 }
 
+async function computeNetSavings(): Promise<NetSavings> {
+  const { keptOut } = computeGrossKeptOutBytes();
+  const schemaBytes = await measureLiveSchemaBytes();
+  const routing = await measureRoutingOverhead();
+  const overheadBytes = schemaBytes + routing.bytes;
+  return computeNetSavingsFromBytes(keptOut, overheadBytes, schemaBytes, routing);
+}
+
 /** Renders the net-savings block appended to every ctx_stats text response. */
-function renderNetSavings(n: Awaited<ReturnType<typeof computeNetSavings>>): string[] {
+export function renderNetSavings(n: NetSavings): string[] {
   const out: string[] = [];
   out.push("");
   out.push("─".repeat(65));

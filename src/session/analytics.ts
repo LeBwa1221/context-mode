@@ -2363,7 +2363,7 @@ function renderNarrative5Section(args: {
 
   // ── Footer.
   out.push("  Your AI talks less, remembers more, costs less.");
-  out.push(`  Locale ${locale} · timezone ${tz} · pricing examples for illustration only.`);
+  out.push(`  Locale ${locale} · timezone ${tz} · token figures are estimates, not measurements.`);
   out.push("");
   const versionStr = version ? `v${version}` : "context-mode";
   out.push(`  ${versionStr}`);
