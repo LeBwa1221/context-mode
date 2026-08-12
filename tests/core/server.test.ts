@@ -21,12 +21,13 @@ import {
   rmSync,
   readFileSync,
   existsSync,
+  unlinkSync,
 } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { describe, test, expect, beforeAll, afterAll, afterEach } from "vitest";
+import { describe, test, expect, beforeAll, beforeEach, afterAll, afterEach } from "vitest";
 
 import { classifyNonZeroExit } from "../../src/exit-classify.js";
 import { PolyglotExecutor } from "../../src/executor.js";
@@ -46,6 +47,7 @@ import {
 import { ROUTING_BLOCK } from "../../hooks/routing-block.mjs";
 import { sanitizeSchemaForStrictClients, resolveExecTimeout, AGY_DEFAULT_EXEC_TIMEOUT_MS, REGISTERED_CTX_TOOLS } from "../../src/server.js";
 import { stripJsonComments, parseJsonc } from "../../src/util/jsonc.js";
+import { resolveProjectDir } from "../../src/util/project-dir.js";
 
 // ─── Shared setup ───────────────────────────────────────────────────────────
 const runtimes = detectRuntimes();
@@ -544,6 +546,87 @@ describe("Large Output Auto-Indexing", () => {
     assert.ok(r.stdout.includes("hello world"));
     assert.ok(!r.stdout.includes("Indexed"), "Small output should NOT be indexed pointer");
   });
+
+  // Regression for the mid-size gap: without `intent`, output between
+  // INTENT_SEARCH_THRESHOLD (5KB) and LARGE_OUTPUT_THRESHOLD (100KB) used to
+  // return raw stdout WITHOUT indexing it, so a later ctx_search could never
+  // find it. Fix: index as a side effect while still returning raw inline.
+  test("mid-size no-intent ctx_execute output: returned raw inline AND ctx_search-able", async () => {
+    const projectDir = mkdtempSync(join(tmpdir(), "ctx-exec-midsize-"));
+    const marker = `midsize-marker-${process.pid}-${Date.now()}`;
+    const proc = startMcpServer({ CONTEXT_MODE_PROJECT_DIR: projectDir });
+
+    // Local waiter that does NOT kill the process on resolve — unlike
+    // collectRpcResponses (designed for a single final batch), this test
+    // needs two sequential round trips on the same live process.
+    function awaitOne(id: number, timeoutMs = 15_000): Promise<DoctorJsonRpcResponse | undefined> {
+      return new Promise((res) => {
+        let buffer = "";
+        const onData = (d: Buffer) => {
+          buffer += d.toString();
+          let idx: number;
+          while ((idx = buffer.indexOf("\n")) >= 0) {
+            const line = buffer.slice(0, idx).trim();
+            buffer = buffer.slice(idx + 1);
+            if (!line) continue;
+            try {
+              const parsed = JSON.parse(line) as DoctorJsonRpcResponse;
+              if (parsed.id === id) {
+                proc.stdout!.off("data", onData);
+                clearTimeout(timer);
+                res(parsed);
+                return;
+              }
+            } catch { /* ignore */ }
+          }
+        };
+        const timer = setTimeout(() => {
+          proc.stdout!.off("data", onData);
+          res(undefined);
+        }, timeoutMs);
+        proc.stdout!.on("data", onData);
+      });
+    }
+
+    try {
+      sendRpc(proc, {
+        jsonrpc: "2.0", id: 1, method: "initialize",
+        params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "ctx-exec-midsize", version: "1.0" } },
+      });
+      sendRpc(proc, { jsonrpc: "2.0", method: "notifications/initialized" });
+      sendRpc(proc, {
+        jsonrpc: "2.0", id: 200, method: "tools/call",
+        params: {
+          name: "ctx_execute",
+          arguments: {
+            language: "javascript",
+            // ~6KB stdout, no `intent` — must land in the 5KB-100KB gap.
+            code: `console.log(${JSON.stringify(marker)} + " " + "x".repeat(6000));`,
+          },
+        },
+      });
+      const execResp = await awaitOne(200);
+
+      expect(execResp?.result?.isError ?? false).toBe(false);
+      const execText = execResp?.result?.content?.[0]?.text ?? "";
+      assert.ok(execText.includes(marker), "Raw stdout (with marker) should be returned inline");
+      assert.ok(execText.includes("x".repeat(6000)), "Full stdout should be returned inline, not truncated");
+      assert.ok(!execText.includes("Indexed"), "Mid-size output must stay inline, not switch to pointer mode");
+
+      sendRpc(proc, {
+        jsonrpc: "2.0", id: 201, method: "tools/call",
+        params: { name: "ctx_search", arguments: { queries: [marker] } },
+      });
+      const searchResp = await awaitOne(201);
+
+      expect(searchResp?.result?.isError ?? false).toBe(false);
+      const searchText = searchResp?.result?.content?.[0]?.text ?? "";
+      assert.ok(searchText.includes(marker), "Mid-size output must have been indexed and be ctx_search-able");
+    } finally {
+      try { proc.kill("SIGTERM"); } catch { /* best effort */ }
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
 
 describe("Cross-Language Cap", () => {
@@ -1734,6 +1817,28 @@ describe("ctx_insight: execFile migration source guard (#441)", () => {
     expect(serverSrc).toMatch(/export function killProcessOnPort\b/);
     expect(serverSrc).toMatch(/export type BrowserOpenResult\b/);
     expect(serverSrc).toMatch(/export type KillResult\b/);
+  });
+});
+
+describe("start.mjs: server process does not chdir", () => {
+  const startMjs = readFileSync(
+    resolve(__dirname, "../../start.mjs"),
+    "utf-8",
+  );
+
+  test("start.mjs never calls process.chdir", () => {
+    // A chdir moves the server cwd into the plugin dir, where tools read it.
+    expect(startMjs).not.toMatch(/process\.chdir\s*\(/);
+  });
+
+  test("project-dir resolution is immune to a plugin-install-path cwd", () => {
+    // Removing the chdir is safe: resolution ignores a plugin-path cwd.
+    const resolved = resolveProjectDir({
+      env: { CONTEXT_MODE_PROJECT_DIR: "/home/user/project" },
+      cwd: "/home/user/.claude/plugins/cache/context-mode/context-mode/1.0.0",
+      pwd: undefined,
+    });
+    expect(resolved).toBe("/home/user/project");
   });
 });
 
@@ -3034,6 +3139,7 @@ describe("batch_execute FS read tracking", () => {
 
 import {
   buildBatchNodeOptionsPrefix,
+  ensureFsPreload,
   runBatchCommands,
   type BatchCommand,
 } from "../../src/server.js";
@@ -3373,6 +3479,23 @@ describe("runBatchCommands edge cases", () => {
     );
     expect(prefix).toBe('set "NODE_OPTIONS=--require C:\\Temp\\cm-fs-preload.js" && ');
   });
+
+  // #951 — OS temp cleaners can remove the preload file while the server is
+  // still alive; injection must re-create it rather than point node children
+  // at a missing --require target.
+  test("ensureFsPreload re-creates the preload file after external deletion (#951)", () => {
+    const p = ensureFsPreload();
+    expect(existsSync(p)).toBe(true);
+
+    unlinkSync(p);
+    expect(existsSync(p)).toBe(false);
+
+    const p2 = ensureFsPreload();
+    expect(p2).toBe(p);
+    expect(existsSync(p)).toBe(true);
+    // Restored file must be the real tracker, not an empty placeholder.
+    expect(readFileSync(p, "utf-8")).toContain("__CM_FS__");
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3515,11 +3638,12 @@ describe("runPool primitive", () => {
     expect(capped).toBe(false);
   });
 
-  test("auto-clamp to job count when concurrency > jobs.length", async () => {
+  test("auto-clamp to job count when concurrency > jobs.length is not a cap", async () => {
     const jobs: PoolJob<number>[] = [{ run: async () => 1 }, { run: async () => 2 }];
     const { effectiveConcurrency, capped } = await runPool(jobs, { concurrency: 8 });
     expect(effectiveConcurrency).toBe(2);
-    expect(capped).toBe(true);
+    // A pool larger than its workload is not a CPU/explicit cap (#915).
+    expect(capped).toBe(false);
   });
 
   test("capByCpuCount caps by os.cpus().length", async () => {
@@ -3830,17 +3954,69 @@ import { buildFetchCode } from "../../src/server.js";
 describe("buildFetchCode — embedded SSRF guard contract", () => {
   const generated = buildFetchCode("https://example.com/x", "/tmp/x");
 
-  test("strips proxy env vars (HTTP_PROXY / HTTPS_PROXY / ALL_PROXY)", () => {
-    // A configured outbound proxy would route fetch through an arbitrary
-    // target; DNS resolution would happen at the proxy and the in-subprocess
-    // DNS guard would never see the rebound IP. The generated subprocess
-    // source must delete every proxy env var before any fetch can run.
-    expect(generated).toMatch(/delete process\.env\.HTTP_PROXY/);
-    expect(generated).toMatch(/delete process\.env\.HTTPS_PROXY/);
-    expect(generated).toMatch(/delete process\.env\.ALL_PROXY/);
-    expect(generated).toMatch(/delete process\.env\.http_proxy/);
-    expect(generated).toMatch(/delete process\.env\.https_proxy/);
-    expect(generated).toMatch(/delete process\.env\.all_proxy/);
+  test("strips proxy env vars (HTTP_PROXY / HTTPS_PROXY / ALL_PROXY) by default (#476 pinning)", () => {
+    // Default must delete proxy env vars so the in-subprocess DNS guard runs (#476).
+    const prev = process.env.CTX_FETCH_ALLOW_PROXY;
+    delete process.env.CTX_FETCH_ALLOW_PROXY;
+    try {
+      const src = buildFetchCode("https://example.com/x", "/tmp/x");
+      expect(src).toMatch(/delete process\.env\.HTTP_PROXY/);
+      expect(src).toMatch(/delete process\.env\.HTTPS_PROXY/);
+      expect(src).toMatch(/delete process\.env\.ALL_PROXY/);
+      expect(src).toMatch(/delete process\.env\.http_proxy/);
+      expect(src).toMatch(/delete process\.env\.https_proxy/);
+      expect(src).toMatch(/delete process\.env\.all_proxy/);
+      expect(src).toMatch(/delete process\.env\.npm_config_proxy/);
+      expect(src).toMatch(/delete process\.env\.npm_config_https_proxy/);
+    } finally {
+      if (prev === undefined) delete process.env.CTX_FETCH_ALLOW_PROXY;
+      else process.env.CTX_FETCH_ALLOW_PROXY = prev;
+    }
+  });
+
+  test("preserves proxy env vars when CTX_FETCH_ALLOW_PROXY=1 (#1039 opt-in)", () => {
+    // Exact "1" opt-in preserves proxy env for corporate egress; parent ssrfGuard remains.
+    const prev = process.env.CTX_FETCH_ALLOW_PROXY;
+    process.env.CTX_FETCH_ALLOW_PROXY = "1";
+    try {
+      const src = buildFetchCode("https://example.com/x", "/tmp/x");
+      expect(src).not.toMatch(/delete process\.env\.HTTP_PROXY/);
+      expect(src).not.toMatch(/delete process\.env\.HTTPS_PROXY/);
+      expect(src).not.toMatch(/delete process\.env\.ALL_PROXY/);
+      expect(src).not.toMatch(/delete process\.env\.http_proxy/);
+      expect(src).not.toMatch(/delete process\.env\.https_proxy/);
+      expect(src).not.toMatch(/delete process\.env\.all_proxy/);
+      expect(src).not.toMatch(/delete process\.env\.npm_config_proxy/);
+      expect(src).not.toMatch(/delete process\.env\.npm_config_https_proxy/);
+      expect(src).not.toMatch(/delete process\.env\[[^\]]*PROXY/i);
+      expect(src).not.toMatch(
+        /process\.env\.(HTTP|HTTPS|ALL)_?PROXY\s*=\s*(undefined|null|['"]{2})/i,
+      );
+      expect(src).toMatch(/CTX_FETCH_ALLOW_PROXY=1/);
+    } finally {
+      if (prev === undefined) delete process.env.CTX_FETCH_ALLOW_PROXY;
+      else process.env.CTX_FETCH_ALLOW_PROXY = prev;
+    }
+  });
+
+  test('rejects non-"1" truthy CTX_FETCH_ALLOW_PROXY (fail-secure; still strips)', () => {
+    // Non-"1" values (e.g. "true") must still strip — fail-secure vs accidental truthy env.
+    const prev = process.env.CTX_FETCH_ALLOW_PROXY;
+    process.env.CTX_FETCH_ALLOW_PROXY = "true";
+    try {
+      const src = buildFetchCode("https://example.com/x", "/tmp/x");
+      expect(src).toMatch(/delete process\.env\.HTTP_PROXY/);
+      expect(src).toMatch(/delete process\.env\.HTTPS_PROXY/);
+      expect(src).toMatch(/delete process\.env\.ALL_PROXY/);
+      expect(src).toMatch(/delete process\.env\.http_proxy/);
+      expect(src).toMatch(/delete process\.env\.https_proxy/);
+      expect(src).toMatch(/delete process\.env\.all_proxy/);
+      expect(src).toMatch(/delete process\.env\.npm_config_proxy/);
+      expect(src).toMatch(/delete process\.env\.npm_config_https_proxy/);
+    } finally {
+      if (prev === undefined) delete process.env.CTX_FETCH_ALLOW_PROXY;
+      else process.env.CTX_FETCH_ALLOW_PROXY = prev;
+    }
   });
 
   test("embedded SSRF classifier is callable as `classifyIp` even when bundler renames the export (#bug-v1.0.133)", () => {
@@ -6385,6 +6561,14 @@ describe("ctx_batch_execute query_scope (issue #696)", () => {
     "utf-8",
   );
 
+  // The batch scope tip is emitted once per process; reset the module-level
+  // flag before each test so the "first call" assertions are deterministic
+  // under vitest's shared fork pool.
+  beforeEach(async () => {
+    const { resetBatchFooterState } = await import("../../src/server.js");
+    resetBatchFooterState();
+  });
+
   test("schema declares query_scope enum with batch default", () => {
     expect(serverSrc).toMatch(/query_scope:\s*z\s*\.enum\(\["batch",\s*"global"\]\)/);
     expect(serverSrc).toContain('.default("batch")');
@@ -6395,14 +6579,19 @@ describe("ctx_batch_execute query_scope (issue #696)", () => {
     expect(serverSrc).toMatch(/query_scope[\s\S]{0,2000}searches the entire persistent index/i);
   });
 
-  test("formatBatchQueryResults default scope keeps batch-local tip", async () => {
+  test("formatBatchQueryResults shows the batch scope tip once per process", async () => {
     const { formatBatchQueryResults } = await import("../../src/server.js");
     const store = new ContentStore(":memory:");
     store.index({ content: "# Section A\n\nValidation of frontmatter is critical.\n", source: "batch:cmd1" });
-    const lines = formatBatchQueryResults(store, ["validation"], "batch:cmd1");
-    const text = lines.join("\n");
-    expect(text).toMatch(/Results are scoped to this batch only/);
-    expect(text).toMatch(/query_scope:\s*"global"/);
+
+    // First non-global batch call in a fresh process surfaces the tip.
+    const first = formatBatchQueryResults(store, ["validation"], "batch:cmd1").join("\n");
+    expect(first).toMatch(/Results are scoped to this batch only/);
+    expect(first).toMatch(/query_scope:\s*"global"/);
+
+    // A second call in the same process omits the now-redundant tip.
+    const second = formatBatchQueryResults(store, ["validation"], "batch:cmd1").join("\n");
+    expect(second).not.toMatch(/Results are scoped to this batch only/);
   });
 
   test("formatBatchQueryResults global scope drops batch tip and notes global scope", async () => {
@@ -6413,6 +6602,20 @@ describe("ctx_batch_execute query_scope (issue #696)", () => {
     const text = lines.join("\n");
     expect(text).toMatch(/query_scope:\s*"global"/);
     expect(text).not.toMatch(/Results are scoped to this batch only/);
+  });
+
+  test("formatBatchQueryResults reports a miss so follow-up terms stay gated", async () => {
+    const { formatBatchQueryResults } = await import("../../src/server.js");
+    const store = new ContentStore(":memory:");
+    store.index({ content: "# Section A\n\nValidation of frontmatter is critical.\n", source: "batch:cmd1" });
+
+    const allHit = { anyMiss: false };
+    formatBatchQueryResults(store, ["validation"], "batch:cmd1", undefined, "batch", allHit);
+    expect(allHit.anyMiss).toBe(false);
+
+    const withMiss = { anyMiss: false };
+    formatBatchQueryResults(store, ["nonexistent-term-xyz"], "batch:cmd1", undefined, "batch", withMiss);
+    expect(withMiss.anyMiss).toBe(true);
   });
 });
 
@@ -6430,8 +6633,11 @@ describe("ctx_search progressive throttle observability (issue #697)", () => {
   });
 
   test("throttle counter line is surfaced on every response, not only after soft cap", () => {
-    // Branch before the soft cap — should still inform the agent.
-    expect(serverSrc).toMatch(/Throttle:\s*call\s+#\$\{searchCallCount\}/);
+    // Branch before the soft cap — should still inform the agent, stating the
+    // soft-cap and hard-block call numbers as absolute thresholds.
+    expect(serverSrc).toMatch(/Throttle:\s*search call\s+#\$\{searchCallCount\}/);
+    expect(serverSrc).toMatch(/Soft cap[\s\S]{0,80}call\s+#\$\{SEARCH_MAX_RESULTS_AFTER\}/);
+    expect(serverSrc).toMatch(/hard block at #\$\{SEARCH_BLOCK_AFTER\}/);
     // Branch at/after soft cap keeps the historical warning shape.
     expect(serverSrc).toMatch(/⚠ search call #\$\{searchCallCount\}/);
   });
@@ -6628,11 +6834,14 @@ describe("parseJsonc / stripJsonComments (src/util/jsonc)", () => {
 describe("resolveExecTimeout (agy default execution timeout)", () => {
   const savedPlatform = process.env.CONTEXT_MODE_PLATFORM;
   const savedOverride = process.env.CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS;
+  const savedGeneric = process.env.CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS;
   afterEach(() => {
     if (savedPlatform === undefined) delete process.env.CONTEXT_MODE_PLATFORM;
     else process.env.CONTEXT_MODE_PLATFORM = savedPlatform;
     if (savedOverride === undefined) delete process.env.CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS;
     else process.env.CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS = savedOverride;
+    if (savedGeneric === undefined) delete process.env.CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS;
+    else process.env.CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS = savedGeneric;
   });
 
   test("passes an explicit timeout through on any platform", () => {
@@ -6645,11 +6854,13 @@ describe("resolveExecTimeout (agy default execution timeout)", () => {
   test("applies the agy default ONLY under antigravity-cli when no timeout is given", () => {
     process.env.CONTEXT_MODE_PLATFORM = "antigravity-cli";
     delete process.env.CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS;
+    delete process.env.CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS;
     expect(resolveExecTimeout(undefined)).toBe(AGY_DEFAULT_EXEC_TIMEOUT_MS);
   });
 
   test("leaves the timeout unbounded (undefined) on non-agy hosts", () => {
     process.env.CONTEXT_MODE_PLATFORM = "claude-code";
+    delete process.env.CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS;
     expect(resolveExecTimeout(undefined)).toBeUndefined();
   });
 
@@ -6657,6 +6868,42 @@ describe("resolveExecTimeout (agy default execution timeout)", () => {
     process.env.CONTEXT_MODE_PLATFORM = "antigravity-cli";
     process.env.CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS = "1500";
     expect(resolveExecTimeout(undefined)).toBe(1500);
+  });
+
+  // #936 — opt-in bounded default on hosts whose RPC timeout is effectively
+  // unbounded (e.g. Claude Code stdio before v2.1.203).
+  test("honors CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS on non-agy hosts (#936)", () => {
+    process.env.CONTEXT_MODE_PLATFORM = "claude-code";
+    process.env.CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS = "120000";
+    expect(resolveExecTimeout(undefined)).toBe(120000);
+  });
+
+  test("explicit timeout still wins over the generic default (#936)", () => {
+    process.env.CONTEXT_MODE_PLATFORM = "claude-code";
+    process.env.CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS = "120000";
+    expect(resolveExecTimeout(5000)).toBe(5000);
+  });
+
+  test("agy-specific override beats the generic default under agy (#936)", () => {
+    process.env.CONTEXT_MODE_PLATFORM = "antigravity-cli";
+    process.env.CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS = "1500";
+    process.env.CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS = "120000";
+    expect(resolveExecTimeout(undefined)).toBe(1500);
+  });
+
+  test("generic default beats the agy built-in default under agy (#936)", () => {
+    process.env.CONTEXT_MODE_PLATFORM = "antigravity-cli";
+    delete process.env.CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS;
+    process.env.CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS = "90000";
+    expect(resolveExecTimeout(undefined)).toBe(90000);
+  });
+
+  test("invalid generic values are ignored (#936)", () => {
+    process.env.CONTEXT_MODE_PLATFORM = "claude-code";
+    for (const bad of ["0", "-1", "abc", ""]) {
+      process.env.CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS = bad;
+      expect(resolveExecTimeout(undefined)).toBeUndefined();
+    }
   });
 });
 

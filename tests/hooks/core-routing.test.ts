@@ -126,6 +126,21 @@ describe("routePreToolUse", () => {
       );
     });
 
+    it("routes PowerShell command payloads like Bash command payloads", () => {
+      const result = routePreToolUse(
+        "PowerShell",
+        { command: "curl https://example.com" },
+        undefined,
+        "claude-code",
+        "powershell-curl",
+      );
+      expect(result).not.toBeNull();
+      expect(result!.action).toBe("modify");
+      expect((result!.updatedInput as Record<string, string>).command).toContain(
+        "curl/wget redirected",
+      );
+    });
+
     it("denies wget commands with modify action", () => {
       const result = routePreToolUse("Bash", {
         command: "wget https://example.com/file.tar.gz",
@@ -393,6 +408,43 @@ describe("routePreToolUse", () => {
       const result = routePreToolUse("WebFetch", { url });
       expect(result).not.toBeNull();
       expect(result!.reason).toContain(url);
+    });
+
+    it("passes claude.ai Artifact URLs through untouched (#938)", () => {
+      const url = "https://claude.ai/code/artifact/51de1b8d-61cb-488e-a964-547ef217f5e9";
+      const result = routePreToolUse("WebFetch", { url });
+      // Native WebFetch fetches these using the caller's authenticated
+      // claude.ai session; ctx_fetch_and_index cannot (no session cookies)
+      // and would only ever get back the empty SPA shell.
+      expect(result).toBeNull();
+    });
+
+    it("passes preview.claude.ai Artifact URLs through untouched (#938)", () => {
+      const url = "https://preview.claude.ai/code/artifact/51de1b8d-61cb-488e-a964-547ef217f5e9";
+      const result = routePreToolUse("WebFetch", { url });
+      expect(result).toBeNull();
+    });
+
+    it("still redirects non-artifact claude.ai URLs (#938)", () => {
+      const result = routePreToolUse("WebFetch", { url: "https://claude.ai/settings" });
+      expect(result).not.toBeNull();
+      expect(result!.action).toBe("deny");
+    });
+
+    it("still redirects a lookalike host, not just a substring match (#938)", () => {
+      const result = routePreToolUse("WebFetch", {
+        url: "https://claude.ai.evil.com/code/artifact/51de1b8d-61cb-488e-a964-547ef217f5e9",
+      });
+      expect(result).not.toBeNull();
+      expect(result!.action).toBe("deny");
+    });
+
+    it("still redirects a plain-http claude.ai Artifact URL (#938)", () => {
+      const result = routePreToolUse("WebFetch", {
+        url: "http://claude.ai/code/artifact/51de1b8d-61cb-488e-a964-547ef217f5e9",
+      });
+      expect(result).not.toBeNull();
+      expect(result!.action).toBe("deny");
     });
 
     it("treats agy read_url_content URL payloads as WebFetch", () => {

@@ -674,14 +674,24 @@ The Codex plugin manifest provides MCP via `.codex-plugin/mcp.json`, skills via
    >
    > `PreCompact` support is runtime-gated: it is present in Codex CLI 0.130.0, while the public Codex hooks docs may lag the shipped hook-event list. Older Codex builds that do not emit `PreCompact` will not create pre-compaction snapshots.
 
-4. Copy routing instructions (recommended even with hooks for full routing awareness):
+4. Copy routing instructions (recommended even with hooks for full routing awareness).
+   On macOS and Linux, copy the platform-neutral core instructions:
 
    ```bash
    CM_ROOT="$(npm root -g)/context-mode"
    cp "$CM_ROOT/configs/codex/AGENTS.md" ./AGENTS.md
    ```
 
-   For global use: `CM_ROOT="$(npm root -g)/context-mode"; cp "$CM_ROOT/configs/codex/AGENTS.md" ~/.codex/AGENTS.md`. Global applies to all projects. If both exist, Codex CLI merges them.
+   On Windows, combine the core instructions with the packaged Windows overlay:
+
+   ```bash
+   CM_ROOT="$(npm root -g)/context-mode"
+   cat "$CM_ROOT/configs/codex/AGENTS.md" "$CM_ROOT/configs/codex/AGENTS.windows.md" > ./AGENTS.md
+   ```
+
+   For global use, replace `./AGENTS.md` with `~/.codex/AGENTS.md` in the command for your platform. Global applies to all projects. If both files exist, Codex CLI merges them.
+
+   With hooks enabled, Codex SessionStart appends the Windows overlay at runtime on Windows; macOS and Linux receive only the neutral routing block. This runtime overlay never writes global or project `AGENTS.md` files. If you manually copied an older combined template, refresh it once with the commands above; SessionStart recognizes the legacy Windows block and will not inject a duplicate.
 
 5. Restart Codex CLI.
 
@@ -754,17 +764,20 @@ The Codex plugin manifest provides MCP via `.codex-plugin/mcp.json`, skills via
 
    > **Note:** Kimi Code uses the same JSON stdin/stdout wire protocol as Codex, but accepts `additionalContext`, `updatedInput`, and `permissionDecision: "ask"` in PreToolUse responses (Codex rejects these). The kimi hook normalizes `ContentPart[]` prompt arrays to strings for downstream extractors.
 
-5. (Optional) Copy the routing instructions file for your project:
+5. (Optional) Copy the routing instructions file for your project. On macOS and Linux:
 
    ```bash
    cp "$(npm root -g)/context-mode/configs/codex/AGENTS.md" ./AGENTS.md
    ```
 
-   Or for global use:
+   On Windows, Kimi reuses the Codex instructions, so combine the core file with its Windows overlay:
 
    ```bash
-   CM_ROOT="$(npm root -g)/context-mode"; cp "$CM_ROOT/configs/codex/AGENTS.md" ~/.kimi-code/AGENTS.md
+   CM_ROOT="$(npm root -g)/context-mode"
+   cat "$CM_ROOT/configs/codex/AGENTS.md" "$CM_ROOT/configs/codex/AGENTS.windows.md" > ./AGENTS.md
    ```
+
+   For global use, replace `./AGENTS.md` with `~/.kimi-code/AGENTS.md` in the command for your platform. If you manually copied an older combined template, refresh it once so the platform-neutral core and packaged Windows guidance stay independently updateable.
 
 Full documentation: [`docs/adapters/kimi-code.md`](docs/adapters/kimi-code.md)
 
@@ -1176,6 +1189,8 @@ npm install -g context-mode
 ## How the Sandbox Works
 
 Each `ctx_execute` call spawns an isolated subprocess with its own process boundary. Scripts can't access each other's memory or state. The subprocess runs your code, captures stdout, and only that stdout enters the conversation context. The raw data — log files, API responses, snapshots — never leaves the sandbox.
+
+Host-driven cancellation is supported end to end: when the MCP client aborts a request, the abort signal reaches `ctx_execute`/`ctx_execute_file` and kills the entire spawned process tree (children and grandchildren — via the dedicated process group on Unix, `taskkill /T` on Windows), never a broad name/port sweep. The per-call `.ctx-mode-*` temp directory is removed afterward, including its `ownership.json` sidecar — a metadata-only manifest (nonce, script path/hash, PIDs, language) that deliberately never contains the executed code, command, cwd, or environment.
 
 Twelve language runtimes are available: JavaScript, TypeScript, Python, Shell, Ruby, Go, Rust, PHP, Perl, R, Elixir, and C#. Bun is auto-detected for 3-5x faster JS/TS execution.
 

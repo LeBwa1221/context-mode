@@ -56,6 +56,7 @@ export const EXTERNAL_MCP_MATCHER_PATTERN = "mcp__";
 /** Tools that context-mode's PreToolUse hook intercepts. */
 export const PRE_TOOL_USE_MATCHERS = [
   "Bash",
+  "PowerShell",
   "WebFetch",
   "Read",
   "Grep",
@@ -63,6 +64,9 @@ export const PRE_TOOL_USE_MATCHERS = [
   "mcp__plugin_context-mode_context-mode__ctx_execute",
   "mcp__plugin_context-mode_context-mode__ctx_execute_file",
   "mcp__plugin_context-mode_context-mode__ctx_batch_execute",
+  // Note: standalone installs register as "context-mode" → mcp__context-mode__ctx_* names.
+  // These are matched by EXTERNAL_MCP_MATCHER_PATTERN ("mcp__") below, so no explicit entries
+  // are needed here. Keeping this list plugin-specific preserves the hooks.json drift guard.
   EXTERNAL_MCP_MATCHER_PATTERN,
 ] as const;
 
@@ -83,6 +87,7 @@ export const PRE_TOOL_USE_MATCHER_PATTERN = PRE_TOOL_USE_MATCHERS.join("|");
  */
 export const POST_TOOL_USE_MATCHERS = [
   "Bash",
+  "PowerShell",
   "Read",
   "Write",
   "Edit",

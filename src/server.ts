@@ -8,6 +8,7 @@ import { join, dirname, resolve, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, tmpdir, cpus, platform } from "node:os";
 import { request as httpsRequest } from "node:https";
+import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
 import { PolyglotExecutor } from "./executor.js";
@@ -55,7 +56,7 @@ import {
 } from "./session/event-emit.js";
 import { persistToolCallCounter, restoreSessionStats } from "./session/persist-tool-calls.js";
 import { appendRetrievalBytes } from "./session/retrieval-marker.js";
-import { searchAllSources } from "./search/unified.js";
+import { searchAllSources, type UnifiedSearchResult } from "./search/unified.js";
 import {
   buildCtxSearchInputSchema,
   CTX_SEARCH_SHARED_MODE,
@@ -279,7 +280,7 @@ const originalRegisterTool = server.registerTool.bind(server);
   const [name, config, handler] = args as [
     string,
     Record<string, unknown>,
-    (toolArgs: Record<string, unknown>) => Promise<unknown> | unknown,
+    (toolArgs: Record<string, unknown>, extra?: unknown) => Promise<unknown> | unknown,
   ];
   if (suppressMcpToolsForNativePluginHost) {
     emitSuppressionDiagnostic();
@@ -293,15 +294,19 @@ const originalRegisterTool = server.registerTool.bind(server);
 
 function wrapToolHandler(
   name: string,
-  handler: (toolArgs: Record<string, unknown>) => Promise<unknown> | unknown,
-): (toolArgs: Record<string, unknown>) => Promise<unknown> {
-  return async (toolArgs: Record<string, unknown>) => {
+  handler: (toolArgs: Record<string, unknown>, extra?: unknown) => Promise<unknown> | unknown,
+): (toolArgs: Record<string, unknown>, extra?: unknown) => Promise<unknown> {
+  return async (toolArgs: Record<string, unknown>, extra?: unknown) => {
     // #854: mark a tool call in-flight so the bridge-child idle reaper never
     // shuts the server down mid-execution during a long ctx_execute/batch that
     // emits no further inbound messages. Symmetric end in finally (success+error).
     noteRequestStart();
     try {
-      return await handler(toolArgs);
+      // The MCP SDK invokes registered tool handlers with (args, extra), where
+      // extra.signal carries request cancellation from the host. Forward it —
+      // dropping it silently disabled the executor-level abort wiring (#83aefee):
+      // every handler saw extra === {} so no running execution could be cancelled.
+      return await handler(toolArgs, extra);
     } catch (err) {
       const result = storageErrorResult(err);
       if (result) {
@@ -424,10 +429,23 @@ const executor = new PolyglotExecutor({
 // Instead, we inject it as an inline shell env prefix in each batch command.
 // This temp file is loaded via --require when batch commands spawn Node processes.
 const CM_FS_PRELOAD = join(tmpdir(), `cm-fs-preload-${process.pid}.js`);
-writeFileSync(
-  CM_FS_PRELOAD,
-  `(function(){var __cm_fs=0;process.on('exit',function(){if(__cm_fs>0)try{process.stderr.write('__CM_FS__:'+__cm_fs+'\\n')}catch(e){}});try{var f=require('fs');var ors=f.readFileSync;f.readFileSync=function(){var r=ors.apply(this,arguments);if(Buffer.isBuffer(r))__cm_fs+=r.length;else if(typeof r==='string')__cm_fs+=Buffer.byteLength(r);return r;};}catch(e){}})();\n`,
-);
+const CM_FS_PRELOAD_SRC =
+  `(function(){var __cm_fs=0;process.on('exit',function(){if(__cm_fs>0)try{process.stderr.write('__CM_FS__:'+__cm_fs+'\\n')}catch(e){}});try{var f=require('fs');var ors=f.readFileSync;f.readFileSync=function(){var r=ors.apply(this,arguments);if(Buffer.isBuffer(r))__cm_fs+=r.length;else if(typeof r==='string')__cm_fs+=Buffer.byteLength(r);return r;};}catch(e){}})();\n`;
+/**
+ * Write the preload file if it is not on disk, and return its path.
+ *
+ * The file lives in the OS temp dir, which periodic cleaners (macOS
+ * $TMPDIR purge, systemd-tmpfiles) can empty while this server process is
+ * still alive. If we keep injecting `NODE_OPTIONS=--require <missing file>`
+ * after that, every node/npm/npx child dies at preload with MODULE_NOT_FOUND
+ * (#951) — so callers must re-check existence at injection time, not rely on
+ * the write at module load.
+ */
+export function ensureFsPreload(): string {
+  if (!existsSync(CM_FS_PRELOAD)) writeFileSync(CM_FS_PRELOAD, CM_FS_PRELOAD_SRC);
+  return CM_FS_PRELOAD;
+}
+ensureFsPreload();
 // In the stdio MCP path, main() also removes this file during graceful
 // shutdown. Plugin-native OpenCode/Kilo imports skip main() (#574), so
 // register a top-level best-effort cleanup too to avoid leaking preload
@@ -1037,10 +1055,13 @@ function persistStats(): void {
       (a, b) => a + b,
       0,
     );
-    const keptOut =
+    const rawKeptOut =
       sessionStats.bytesIndexed +
       sessionStats.bytesSandboxed +
       sessionStats.cacheBytesSaved;
+    // Indexed content returned as query snippets was counted in both keptOut
+    // and totalReturned, inflating total_processed and tokens_saved (#1025).
+    const keptOut = Math.max(0, rawKeptOut - totalReturned);
     const totalProcessed = keptOut + totalReturned;
     const reductionPct =
       totalProcessed > 0
@@ -1376,12 +1397,23 @@ export function extractSnippet(
 
 export type BatchQueryScope = "batch" | "global";
 
+// The batch-scope tip is identical on every non-global ctx_batch_execute call,
+// so it is emitted once per server process (the first non-global batch) instead
+// of repeated on every call. resetBatchFooterState() restores the initial state
+// so tests are deterministic under vitest's shared fork pool.
+let batchScopeTipShown = false;
+
+export function resetBatchFooterState(): void {
+  batchScopeTipShown = false;
+}
+
 export function formatBatchQueryResults(
   store: ContentStore,
   queries: string[],
   source: string,
   maxOutput = 80 * 1024,
   scope: BatchQueryScope = "batch",
+  stats?: { anyMiss: boolean },
 ): string[] {
   const sections: string[] = [];
   let outputSize = 0;
@@ -1412,17 +1444,40 @@ export function formatBatchQueryResults(
       continue;
     }
 
+    if (stats) stats.anyMiss = true;
     sections.push("No matching sections found.");
     sections.push("");
   }
 
   if (scope === "global") {
     sections.push(`\n> **Scope:** Queries searched the entire persistent index (query_scope: "global").`);
-  } else {
+  } else if (!batchScopeTipShown) {
+    batchScopeTipShown = true;
     sections.push(`\n> **Tip:** Results are scoped to this batch only. To search across all indexed sources, use \`ctx_search(queries: [...])\` or call ctx_batch_execute with \`query_scope: "global"\`.`);
   }
 
   return sections;
+}
+
+/**
+ * Cross-query dedup for a multi-query ctx_search call. A chunk that matches
+ * more than one query would otherwise print verbatim under each query's
+ * section. Results carry no stable chunk id (see SearchResult /
+ * UnifiedSearchResult), so identity is the query-independent
+ * `source\0title\0content` tuple; the emitted snippet is windowed per query
+ * and cannot be used as a key. `seen` is shared across the call's queries and
+ * mutated in place, so the first occurrence of a chunk is kept and later
+ * repeats are dropped.
+ */
+export function dedupeAcrossQueries<
+  T extends { source: string; title: string; content: string },
+>(results: T[], seen: Set<string>): T[] {
+  return results.filter((r) => {
+    const key = [r.source, r.title, r.content].join("\u0000");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 // ─────────────────────────────────────────────────────────
@@ -1497,16 +1552,30 @@ function truncateCommandForEcho(command: string): string {
  * interrupt. Every other host enforces its own RPC timeout, so we keep the
  * no-server-timer behavior there (Issue #406 — long builds need an unbounded
  * run). A caller can still pass an explicit `timeout` to override on any host.
+ *
+ * Some hosts' RPC timeouts are effectively unbounded in practice — Claude Code
+ * stdio before v2.1.203 exempted stdio MCP servers from the idle timeout, so a
+ * hung ctx_execute blocked the agent until manual interruption (#936).
+ * CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS lets users opt into a bounded default on
+ * any host; an explicit per-call `timeout` still wins, and under agy the
+ * platform-specific CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS takes precedence over it.
  */
 export const AGY_DEFAULT_EXEC_TIMEOUT_MS = 120_000;
 export function resolveExecTimeout(timeout: number | undefined): number | undefined {
   if (timeout !== undefined) return timeout;
-  // Only agy gets a default — every other host enforces its own RPC timeout, so
-  // keep the unbounded behavior there. Detected via the env the agy bundle pins
-  // (CONTEXT_MODE_PLATFORM=antigravity-cli). Tunable via CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS.
-  if (detectPlatform().platform !== "antigravity-cli") return undefined;
+  const generic = Number(process.env.CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS);
+  const genericValid = Number.isFinite(generic) && generic > 0;
+  // Only agy gets a built-in default — every other host enforces its own RPC
+  // timeout, so keep the unbounded behavior there unless the user opted in via
+  // CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS. Detected via the env the agy bundle
+  // pins (CONTEXT_MODE_PLATFORM=antigravity-cli). Tunable via CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS.
+  if (detectPlatform().platform !== "antigravity-cli") {
+    return genericValid ? generic : undefined;
+  }
   const override = Number(process.env.CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS);
-  return Number.isFinite(override) && override > 0 ? override : AGY_DEFAULT_EXEC_TIMEOUT_MS;
+  if (Number.isFinite(override) && override > 0) return override;
+  if (genericValid) return generic;
+  return AGY_DEFAULT_EXEC_TIMEOUT_MS;
 }
 
 /**
@@ -1748,7 +1817,7 @@ EXAMPLE: ctx_execute(language: "javascript", code: "const out = require('child_p
         ),
     }),
   },
-  async ({ language, code, timeout, background, cwd, intent }) => {
+  async ({ language, code, timeout, background, cwd, intent }, extra: { signal?: AbortSignal } = {}) => {
     // Security: deny-only firewall
     if (language === "shell") {
       const denied = checkDenyPolicy(code, "execute");
@@ -1827,7 +1896,7 @@ __cm_main().catch(e=>{console.error(e);process.exitCode=1});${background ? '\nse
 })(typeof require!=='undefined'?require:null);`;
       }
       const effTimeout = resolveExecTimeout(timeout);
-      const result = await executor.execute({ language, code: instrumentedCode, timeout: effTimeout, background, cwd });
+      const result = await executor.execute({ language, code: instrumentedCode, timeout: effTimeout, background, cwd, signal: extra.signal });
 
       // Echo the executed source code before stdout so users can audit
       // and tooling can block command patterns (Issues #717 + #736).
@@ -1888,11 +1957,12 @@ __cm_main().catch(e=>{console.error(e);process.exitCode=1});${background ? '\nse
         const { isError, output } = classifyNonZeroExit({
           language, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr,
         });
+        const errorSource = `execute:${language}${isError ? ":error" : ""}:${shortHash(code)}`;
         if (intent && intent.trim().length > 0 && Buffer.byteLength(output) > INTENT_SEARCH_THRESHOLD) {
           trackIndexed(Buffer.byteLength(output));
           return trackResponse("ctx_execute", {
             content: [
-              { type: "text" as const, text: `${echo}${intentSearch(output, intent, isError ? `execute:${language}:error` : `execute:${language}`)}` },
+              { type: "text" as const, text: `${echo}${intentSearch(output, intent, errorSource)}` },
             ],
             isError,
           });
@@ -1902,10 +1972,14 @@ __cm_main().catch(e=>{console.error(e);process.exitCode=1});${background ? '\nse
           trackIndexed(Buffer.byteLength(output));
           return trackResponse("ctx_execute", {
             content: [
-              { type: "text" as const, text: `${echo}${intentSearch(output, "errors failures exceptions", isError ? `execute:${language}:error` : `execute:${language}`)}` },
+              { type: "text" as const, text: `${echo}${intentSearch(output, "errors failures exceptions", errorSource)}` },
             ],
             isError,
           });
+        }
+        // mid-size: index for later ctx_search, still return inline
+        if (Buffer.byteLength(output) > INTENT_SEARCH_THRESHOLD) {
+          indexForSearch(output, errorSource);
         }
         return trackResponse("ctx_execute", {
           content: [
@@ -1916,20 +1990,21 @@ __cm_main().catch(e=>{console.error(e);process.exitCode=1});${background ? '\nse
       }
 
       const stdout = result.stdout || "(no output)";
+      const source = `execute:${language}:${shortHash(code)}`;
 
       // Intent-driven search: if intent provided and output is large enough
       if (intent && intent.trim().length > 0 && Buffer.byteLength(stdout) > INTENT_SEARCH_THRESHOLD) {
         trackIndexed(Buffer.byteLength(stdout));
         return trackResponse("ctx_execute", {
           content: [
-            { type: "text" as const, text: `${echo}${intentSearch(stdout, intent, `execute:${language}`)}` },
+            { type: "text" as const, text: `${echo}${intentSearch(stdout, intent, source)}` },
           ],
         });
       }
 
       // Auto-index large stdout into FTS5 — return pointer, not raw content
       if (Buffer.byteLength(stdout) > LARGE_OUTPUT_THRESHOLD) {
-        const indexed = indexStdout(stdout, `execute:${language}`);
+        const indexed = indexStdout(stdout, source);
         // Prepend echo to the first text content so provenance still surfaces
         const echoed = {
           ...indexed,
@@ -1940,6 +2015,11 @@ __cm_main().catch(e=>{console.error(e);process.exitCode=1});${background ? '\nse
           ),
         };
         return trackResponse("ctx_execute", echoed);
+      }
+
+      // mid-size: index for later ctx_search, still return inline
+      if (Buffer.byteLength(stdout) > INTENT_SEARCH_THRESHOLD) {
+        indexForSearch(stdout, source);
       }
 
       return trackResponse("ctx_execute", {
@@ -1958,6 +2038,17 @@ __cm_main().catch(e=>{console.error(e);process.exitCode=1});${background ? '\nse
     }
   },
 );
+
+// short deterministic hash → distinct per-call source labels (avoid clobber)
+function shortHash(input: string): string {
+  return createHash("sha256").update(input).digest("hex").slice(0, 8);
+}
+
+// index into FTS5 as a side effect; does not change what's returned
+function indexForSearch(content: string, source: string): void {
+  const store = getStore();
+  store.index({ content, source, attribution: currentAttribution() });
+}
 
 // ─────────────────────────────────────────────────────────
 // Helper: index stdout into FTS5 knowledge base
@@ -2119,7 +2210,7 @@ EXAMPLE: ctx_execute_file(path: "data.csv", language: "javascript", code: "const
         ),
     }),
   },
-  async ({ path, language, code, timeout, intent }) => {
+  async ({ path, language, code, timeout, intent }, extra: { signal?: AbortSignal } = {}) => {
     // Security (#852): confine the processed file to the project root so
     // ctx_execute_file cannot be used to escape the host's sandbox/permission
     // controls. Runs before the deny-glob check — boundary first, then policy.
@@ -2146,6 +2237,7 @@ EXAMPLE: ctx_execute_file(path: "data.csv", language: "javascript", code: "const
         language,
         code,
         timeout: effTimeout,
+        signal: extra.signal,
       });
 
       // Echo path + executed source code before stdout for audit/debug
@@ -2168,11 +2260,12 @@ EXAMPLE: ctx_execute_file(path: "data.csv", language: "javascript", code: "const
         const { isError, output } = classifyNonZeroExit({
           language, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr,
         });
+        const errorSource = `file:${path}${isError ? ":error" : ""}:${shortHash(code)}`;
         if (intent && intent.trim().length > 0 && Buffer.byteLength(output) > INTENT_SEARCH_THRESHOLD) {
           trackIndexed(Buffer.byteLength(output));
           return trackResponse("ctx_execute_file", {
             content: [
-              { type: "text" as const, text: `${echo}${intentSearch(output, intent, isError ? `file:${path}:error` : `file:${path}`)}` },
+              { type: "text" as const, text: `${echo}${intentSearch(output, intent, errorSource)}` },
             ],
             isError,
           });
@@ -2182,10 +2275,14 @@ EXAMPLE: ctx_execute_file(path: "data.csv", language: "javascript", code: "const
           trackIndexed(Buffer.byteLength(output));
           return trackResponse("ctx_execute_file", {
             content: [
-              { type: "text" as const, text: `${echo}${intentSearch(output, "errors failures exceptions", isError ? `file:${path}:error` : `file:${path}`)}` },
+              { type: "text" as const, text: `${echo}${intentSearch(output, "errors failures exceptions", errorSource)}` },
             ],
             isError,
           });
+        }
+        // mid-size: index for later ctx_search, still return inline
+        if (Buffer.byteLength(output) > INTENT_SEARCH_THRESHOLD) {
+          indexForSearch(output, errorSource);
         }
         return trackResponse("ctx_execute_file", {
           content: [
@@ -2196,19 +2293,20 @@ EXAMPLE: ctx_execute_file(path: "data.csv", language: "javascript", code: "const
       }
 
       const stdout = result.stdout || "(no output)";
+      const source = `file:${path}:${shortHash(code)}`;
 
       if (intent && intent.trim().length > 0 && Buffer.byteLength(stdout) > INTENT_SEARCH_THRESHOLD) {
         trackIndexed(Buffer.byteLength(stdout));
         return trackResponse("ctx_execute_file", {
           content: [
-            { type: "text" as const, text: `${echo}${intentSearch(stdout, intent, `file:${path}`)}` },
+            { type: "text" as const, text: `${echo}${intentSearch(stdout, intent, source)}` },
           ],
         });
       }
 
       // Auto-index large stdout into FTS5 — return pointer, not raw content
       if (Buffer.byteLength(stdout) > LARGE_OUTPUT_THRESHOLD) {
-        const indexed = indexStdout(stdout, `file:${path}`);
+        const indexed = indexStdout(stdout, source);
         const echoed = {
           ...indexed,
           content: indexed.content.map((c, i) =>
@@ -2218,6 +2316,11 @@ EXAMPLE: ctx_execute_file(path: "data.csv", language: "javascript", code: "const
           ),
         };
         return trackResponse("ctx_execute_file", echoed);
+      }
+
+      // mid-size: index for later ctx_search, still return inline
+      if (Buffer.byteLength(stdout) > INTENT_SEARCH_THRESHOLD) {
+        indexForSearch(stdout, source);
       }
 
       return trackResponse("ctx_execute_file", {
@@ -2711,6 +2814,11 @@ EXAMPLE: ctx_search(queries: ["last user prompt", "active skills", "open blocker
 
       const configDir = _detectedAdapter?.getConfigDir() ?? resolveClaudeConfigDir();
 
+      // Track chunks already emitted by an earlier query so a chunk matching
+      // multiple queries prints once (multi-query calls only; see
+      // dedupeAcrossQueries).
+      const seenChunks = new Set<string>();
+
       try {
       for (const q of queryList) {
         if (totalSize > MAX_TOTAL) {
@@ -2749,7 +2857,19 @@ EXAMPLE: ctx_search(queries: ["last user prompt", "active skills", "open blocker
           continue;
         }
 
-        const formatted = results
+        // For multi-query calls, drop chunks already shown under an earlier
+        // query so the same chunk never prints twice. Single-query output is
+        // left byte-identical.
+        let emitResults: Array<SearchResult | UnifiedSearchResult> = results;
+        if (queryList.length > 1) {
+          emitResults = dedupeAcrossQueries<SearchResult | UnifiedSearchResult>(results, seenChunks);
+          if (emitResults.length === 0) {
+            sections.push(`## ${q}\n(all matches already shown above)`);
+            continue;
+          }
+        }
+
+        const formatted = emitResults
           .map((r, i) => {
             const origin = (r as any).origin || "current-session";
             const ts = (r as any).timestamp ? (r as any).timestamp.slice(0, 16).replace("T", " ") : "";
@@ -2779,15 +2899,14 @@ EXAMPLE: ctx_search(queries: ["last user prompt", "active skills", "open blocker
       // already truncated. Soft warning after SEARCH_MAX_RESULTS_AFTER calls;
       // gentle informational line before that.
       const throttleRemaining = Math.max(0, SEARCH_BLOCK_AFTER - searchCallCount);
-      const softCapRemaining = Math.max(0, SEARCH_MAX_RESULTS_AFTER - searchCallCount);
       if (searchCallCount >= SEARCH_MAX_RESULTS_AFTER) {
         output += `\n\n⚠ search call #${searchCallCount}/${SEARCH_BLOCK_AFTER} in this window. ` +
           `Results limited to ${effectiveLimit}/query. ${throttleRemaining} call(s) remaining before block. ` +
           `Batch queries: ctx_search(queries: ["q1","q2","q3"]) or use ctx_batch_execute.`;
       } else {
-        output += `\n\n> Throttle: call #${searchCallCount}/${SEARCH_BLOCK_AFTER} in this window. ` +
-          `${softCapRemaining} call(s) before soft cap. ` +
-          `Prefer ctx_search(queries: [...]) array form for multi-query workloads — it counts as a single call.`;
+        output += `\n\n> Throttle: search call #${searchCallCount} this window. ` +
+          `Soft cap (fewer results/query) at call #${SEARCH_MAX_RESULTS_AFTER}, hard block at #${SEARCH_BLOCK_AFTER}. ` +
+          `Prefer ctx_search(queries: [...]) array form; it counts as one call.`;
       }
 
       if (output.trim().length === 0) {
@@ -2872,6 +2991,20 @@ export function buildFetchCode(url: string, outputPath: string): string {
       ? `var classifyIp = ${classifyIpInner};`
       : `var ${classifyIpFnName} = ${classifyIpInner};\nvar classifyIp = ${classifyIpFnName};`;
   const strictMode = process.env.CTX_FETCH_STRICT === "1";
+  // Default strips proxy env so the connect-time rebinding guard runs (#476/#1039).
+  // Opt-in is exact string "1" only (any other value keeps the strip path).
+  const allowProxy = process.env.CTX_FETCH_ALLOW_PROXY === "1";
+  const proxyEnvBlock = allowProxy
+    ? `// Proxy env vars preserved under CTX_FETCH_ALLOW_PROXY=1 (issue #1039).`
+    : `// Strip proxy env by default so DNS rebinding guard sees connect-time IPs (#1039).
+delete process.env.HTTP_PROXY;
+delete process.env.HTTPS_PROXY;
+delete process.env.ALL_PROXY;
+delete process.env.http_proxy;
+delete process.env.https_proxy;
+delete process.env.all_proxy;
+delete process.env.npm_config_proxy;
+delete process.env.npm_config_https_proxy;`;
   return `
 const TurndownService = require(${turndownPath});
 const { gfm } = require(${gfmPath});
@@ -2881,19 +3014,7 @@ const dnsPromises = require('no' + 'de:dns/promises');
 const url = ${JSON.stringify(url)};
 const outputPath = ${escapedOutputPath};
 
-// Strip proxy env vars from this subprocess only. A configured outbound
-// proxy (HTTP_PROXY / HTTPS_PROXY / ALL_PROXY) would route fetch through
-// an arbitrary target — DNS resolution happens at the proxy and the
-// in-subprocess DNS rebinding guard never sees the rebound IP. The
-// sandbox fetch path has no legitimate need for an upstream proxy.
-delete process.env.HTTP_PROXY;
-delete process.env.HTTPS_PROXY;
-delete process.env.ALL_PROXY;
-delete process.env.http_proxy;
-delete process.env.https_proxy;
-delete process.env.all_proxy;
-delete process.env.npm_config_proxy;
-delete process.env.npm_config_https_proxy;
+${proxyEnvBlock}
 
 ${classifyIpSrc}
 
@@ -3794,7 +3915,10 @@ EXAMPLE: ctx_batch_execute(
       // Inject NODE_OPTIONS for FS read tracking in spawned Node processes.
       // The executor denies NODE_OPTIONS in its env (security), so we set it
       // as an inline shell prefix. This only affects child `node` invocations.
-      const nodeOptsPrefix = buildBatchNodeOptionsPrefix(runtimes.shell, CM_FS_PRELOAD);
+      // ensureFsPreload re-creates the temp file if an OS temp cleaner removed
+      // it since startup — injecting a missing --require kills every node
+      // child with MODULE_NOT_FOUND (#951).
+      const nodeOptsPrefix = buildBatchNodeOptionsPrefix(runtimes.shell, ensureFsPreload());
 
       // Full stdout is preserved per-command and indexed into FTS5 (Issue #61, #197).
       // Concurrency>1 switches to a worker pool with per-command timeouts.
@@ -3861,10 +3985,13 @@ EXAMPLE: ctx_batch_execute(
       // When the caller passes query_scope: "global", searches reach the entire
       // persistent index in the same round trip. Cross-source search remains
       // available via explicit ctx_search() as well.
-      const queryResults = formatBatchQueryResults(store, queries, source, undefined, query_scope);
+      const batchStats = { anyMiss: false };
+      const queryResults = formatBatchQueryResults(store, queries, source, undefined, query_scope, batchStats);
 
-      // Get searchable terms for edge cases where follow-up is needed
-      const distinctiveTerms = store.getDistinctiveTerms
+      // Searchable terms help the agent reformulate after a miss. Surface them
+      // only when at least one query returned nothing (the follow-up case),
+      // not on the common all-hit path, to keep the batch footer lean.
+      const distinctiveTerms = batchStats.anyMiss && store.getDistinctiveTerms
         ? store.getDistinctiveTerms(indexed.sourceId)
         : [];
 
@@ -4072,21 +4199,17 @@ server.registerTool(
                 convReal = getConversationWindowStats({ sessionId: sid, worktreeHash: dbHash, sessionsDir: getSessionDir(), contentDbPath });
               }
               const lifeRealBase = getRealBytesStats({ sessionsDir: getSessionDir() });
-              // v1.0.134 SLICE C: lifetime tier sums ALL chunks (no
-              // session_id filter). Without this fold, lifetime "kept out"
-              // only counts session_events.bytes_avoided and ignores the
-              // bulk of indexed payload across every prior conversation.
+              // Honest-savings fix (reverts v1.0.134 SLICE C fold): indexed
+              // chunks are content captured for recall — the bulk of it
+              // entered past context windows through the original tool
+              // results, so counting it as "kept out" double-counts. Chunks
+              // stay visible as contentBytes ("indexed for recall");
+              // bytesAvoided counts only recorded redirect events.
               const lifeContentBytes = getContentBytesAllSessions(contentDbPath);
               const lifeReal = {
                 ...lifeRealBase,
                 contentBytes: lifeRealBase.contentBytes + lifeContentBytes,
-                bytesAvoided: lifeRealBase.bytesAvoided + lifeContentBytes,
-                totalSavedTokens: Math.floor(
-                  (lifeRealBase.eventDataBytes
-                    + lifeRealBase.bytesAvoided
-                    + lifeContentBytes
-                    + lifeRealBase.snapshotBytes) / 4,
-                ),
+                totalSavedTokens: Math.floor(lifeRealBase.bytesAvoided / 4),
               };
               realBytes = { conversation: convReal, lifetime: lifeReal };
             }
