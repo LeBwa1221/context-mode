@@ -71,8 +71,10 @@ import { stripJsonComments } from "./util/jsonc.js";
 import { resolveClaudeConfigDir } from "./util/claude-config.js";
 import { resolveProjectDir } from "./util/project-dir.js";
 import { loadDatabase } from "./db-base.js";
-import { AnalyticsEngine, formatReport, getConversationStats, getContentBytesAllSessions, getConversationWindowStats, getLifetimeStats, getMultiAdapterLifetimeStats, getRealBytesStats, pricePerToken } from "./session/analytics.js";
+import { AnalyticsEngine, formatReport, getConversationStats, getContentBytesAllSessions, getConversationWindowStats, getLifetimeStats, getMultiAdapterLifetimeStats, getRealBytesStats, kb } from "./session/analytics.js";
 import { estimateTokens } from "./session/token-estimate.js";
+import { getRoutingBlockMode, createRoutingBlock, createSubagentPointer } from "../hooks/routing-block.mjs";
+import { createToolNamer, KNOWN_PLATFORMS } from "../hooks/core/tool-naming.mjs";
 const __pkg_dir = dirname(fileURLToPath(import.meta.url));
 const VERSION: string = (() => {
   for (const rel of ["../package.json", "./package.json"]) {
@@ -1004,10 +1006,10 @@ const STATS_PERSIST_THROTTLE_MS = 500;
 // it sees a future schema, so legacy bundles degrade gracefully on upgrade rather than silently
 // rendering missing fields (PR #401 architect review P1.3).
 // v2: added tokens_saved_lifetime + dollars_saved_lifetime.
-const STATS_SCHEMA_VERSION = 2;
-// pricePerToken() intentionally NOT defined here — single source in
-// src/session/analytics.ts re-exported above. (P1.1 — pricing constant dedup,
-// PR #401 architect + ops 2-vote convergence.)
+// v3: removed dollars_saved_session + dollars_saved_lifetime (net-savings
+// accounting rework -- an unmeasured token estimate priced at a hardcoded
+// fallback rate was three assumptions deep; bytes + estimated tokens stay).
+const STATS_SCHEMA_VERSION = 3;
 const LIFETIME_REFRESH_MS = 30_000;
 // Matches the conversion factor in src/session/analytics.ts renderBottomLine:
 // ~1KB per session event ÷ 4 bytes/token = 256 tokens/event.
@@ -1100,14 +1102,15 @@ function persistStats(): void {
       kept_out: keptOut,
       total_processed: totalProcessed,
       reduction_pct: reductionPct,
+      // tokens_saved is an ESTIMATE (bytes / CHARS_PER_TOKEN, see
+      // src/session/token-estimate.ts) -- not a measured token count.
       tokens_saved: tokensSaved,
-      // statusline-facing $ values — pre-computed at the current per-token
-      // rate (dynamic when PI_CONTEXT_MODE_PRICE_OUTPUT_PER_TOKEN is set by a
-      // Pi host; Opus $15/1M otherwise). Resolved on every persist via
-      // pricePerToken() so the env override picks up without an MCP restart.
-      dollars_saved_session: +(tokensSaved * pricePerToken()).toFixed(2),
       tokens_saved_lifetime: lifetimeTokens,
-      dollars_saved_lifetime: +(lifetimeTokens * pricePerToken()).toFixed(2),
+      // dollars_saved_session/lifetime were removed (v3): a dollar figure
+      // derived from an unmeasured token estimate at a hardcoded fallback
+      // price was three assumptions deep and got read as fact. Bytes and
+      // estimated tokens above are the honest units; pricePerToken() stays
+      // exported for callers that explicitly want to do that math themselves.
       by_tool: Object.fromEntries(
         Object.keys({ ...sessionStats.calls, ...sessionStats.bytesReturned }).map(
           (t) => [
@@ -1128,6 +1131,159 @@ function persistStats(): void {
   } catch {
     // best-effort — never break tool calls because of stats persistence
   }
+}
+
+// ─────────────────────────────────────────────────────────
+// Overhead accounting (net-savings rework)
+//
+// context-mode occupies the model's context window itself: the MCP tool
+// schemas (sent once per session, re-sent on reconnect) and the SessionStart
+// routing block (once per session, and re-injected on every subagent spawn).
+// With prompt caching neither is a fresh per-request billing charge — the
+// schemas are a one-time cache write plus ongoing WINDOW OCCUPANCY, and the
+// routing block is the same. ctx_stats reports this overhead against the
+// gross bytes/tokens kept out so "savings" is net, not gross.
+//
+// Every number below is measured live from the running server / actual
+// session config, not a hardcoded constant, so it self-corrects when the
+// tool schemas or routing block change size.
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Sum JSON.stringify(tool).length across the server's OWN live tools/list
+ * response — the literal bytes a client re-pays on every reconnect. Reuses
+ * the same low-level request-handler lookup as installStrictClientSchemaCompat
+ * above (`_requestHandlers.get("tools/list")`) instead of a second code path,
+ * so this number can never drift from what a real MCP client receives.
+ */
+async function measureLiveSchemaBytes(): Promise<number> {
+  try {
+    const low = server.server as unknown as {
+      _requestHandlers?: Map<string, (req: unknown, extra: unknown) => Promise<unknown>>;
+    };
+    const handler = low._requestHandlers?.get("tools/list");
+    if (typeof handler !== "function") return 0;
+    const result = (await handler(
+      { method: "tools/list", params: {} } as unknown,
+      {} as unknown,
+    )) as { tools?: unknown[] } | undefined;
+    if (!result || !Array.isArray(result.tools)) return 0;
+    return result.tools.reduce((sum: number, t) => sum + JSON.stringify(t).length, 0);
+  } catch {
+    return 0;
+  }
+}
+
+/** Overhead the current session actually paid for the SessionStart routing block. */
+interface RoutingOverhead {
+  mode: string;
+  bytes: number;
+  /** Bytes re-injected on EACH subagent spawn — a rate, not a total (spawn count isn't tracked). */
+  subagentPointerBytes: number;
+}
+
+/**
+ * Routing-block bytes for the mode this session is actually running
+ * (CONTEXT_MODE_ROUTING_BLOCK; default "short" — see hooks/routing-block.mjs),
+ * not the worst-case "full" mode. Platform defaults to claude-code (the
+ * longest tool-name prefix of any supported host, so this is the worst-case
+ * byte count when the real platform can't be determined) unless
+ * CONTEXT_MODE_PLATFORM names a known one.
+ */
+function measureRoutingOverhead(): RoutingOverhead {
+  const mode = getRoutingBlockMode();
+  const platform = KNOWN_PLATFORMS.includes(process.env.CONTEXT_MODE_PLATFORM ?? "")
+    ? (process.env.CONTEXT_MODE_PLATFORM as string)
+    : "claude-code";
+  const t = createToolNamer(platform);
+  const bytes = createRoutingBlock(t, { mode }).length;
+  const subagentPointerBytes = createSubagentPointer(t, { toolSearchBootstrap: true }).length;
+  return { mode, bytes, subagentPointerBytes };
+}
+
+/** gross bytes kept out this session, using the same #1025 dedupe fix as persistStats(). */
+function computeGrossKeptOutBytes(): { keptOut: number; totalReturned: number } {
+  const totalReturned = Object.values(sessionStats.bytesReturned).reduce((a, b) => a + b, 0);
+  const rawKeptOut =
+    sessionStats.bytesIndexed + sessionStats.bytesSandboxed + sessionStats.cacheBytesSaved;
+  const keptOut = Math.max(0, rawKeptOut - totalReturned);
+  return { keptOut, totalReturned };
+}
+
+/**
+ * Net-savings accounting: gross bytes kept out minus what context-mode
+ * itself occupies (schema + routing block). Reports the break-even point
+ * ("overhead paid back after the first N KB redirected") and states
+ * plainly when net is negative rather than reporting a misleading positive
+ * number for a session that never triggered a redirect.
+ */
+// Standard Claude context window, in tokens — used only to express net
+// savings as "% of window" the way the team-lead brief did (~2.1% of 200K).
+const CONTEXT_WINDOW_TOKENS = 200_000;
+
+async function computeNetSavings(): Promise<{
+  grossBytes: number;
+  grossTokens: number;
+  overheadBytes: number;
+  schemaBytes: number;
+  routing: RoutingOverhead;
+  netBytes: number;
+  netTokens: number;
+  netPctOfWindow: number;
+  breakEvenReached: boolean;
+}> {
+  const { keptOut } = computeGrossKeptOutBytes();
+  const schemaBytes = await measureLiveSchemaBytes();
+  const routing = measureRoutingOverhead();
+  const overheadBytes = schemaBytes + routing.bytes;
+  const netBytes = keptOut - overheadBytes;
+  const netTokens = estimateTokens(Math.max(0, netBytes));
+  return {
+    grossBytes: keptOut,
+    grossTokens: estimateTokens(keptOut),
+    overheadBytes,
+    schemaBytes,
+    routing,
+    netBytes,
+    netTokens,
+    netPctOfWindow: (netTokens / CONTEXT_WINDOW_TOKENS) * 100,
+    breakEvenReached: keptOut >= overheadBytes,
+  };
+}
+
+/** Renders the net-savings block appended to every ctx_stats text response. */
+function renderNetSavings(n: Awaited<ReturnType<typeof computeNetSavings>>): string[] {
+  const out: string[] = [];
+  out.push("");
+  out.push("─".repeat(65));
+  out.push("Net savings (gross minus what context-mode itself occupies)");
+  out.push(
+    `  gross kept out         ${kb(n.grossBytes)}  (~${n.grossTokens.toLocaleString("en-US")} tokens est.)`,
+  );
+  out.push(
+    `  context-mode overhead  ${kb(n.overheadBytes)}  ` +
+      `(schema ${kb(n.schemaBytes)} + routing[${n.routing.mode}] ${kb(n.routing.bytes)})`,
+  );
+  if (n.netBytes < 0) {
+    out.push(
+      `  net                    -${kb(-n.netBytes)}  ` +
+        `NEGATIVE — this session has not redirected enough to pay back its own overhead yet.`,
+    );
+  } else {
+    out.push(
+      `  net                    ${kb(n.netBytes)}  (${n.netPctOfWindow.toFixed(2)}% of the ${CONTEXT_WINDOW_TOKENS.toLocaleString("en-US")}-token context window)`,
+    );
+  }
+  out.push(
+    n.breakEvenReached
+      ? `  break-even reached — overhead paid back after the first ${kb(n.overheadBytes)} redirected.`
+      : `  break-even NOT reached — needs ${kb(n.overheadBytes - n.grossBytes)} more redirected to pay back overhead.`,
+  );
+  out.push(
+    `  routing block is re-injected on every subagent spawn: ~${n.routing.subagentPointerBytes}b each (spawn count not tracked this session).`,
+  );
+  out.push("─".repeat(65));
+  return out;
 }
 
 // ==============================================================================
@@ -4115,6 +4271,14 @@ server.registerTool(
       try { multiAdapter = getMultiAdapterLifetimeStats(); } catch { /* never block ctx_stats */ }
       text = formatReport(report, VERSION, _latestVersion, (lifetime || multiAdapter) ? { lifetime, multiAdapter } : undefined);
     }
+
+    // Net-savings accounting (#3 of the net-savings rework) — appended to
+    // every ctx_stats response regardless of which branch above ran.
+    // Best-effort: a failure here must never block the rest of ctx_stats.
+    try {
+      const net = await computeNetSavings();
+      text += "\n" + renderNetSavings(net).join("\n");
+    } catch { /* never block ctx_stats */ }
 
     return trackResponse("ctx_stats", {
       content: [{ type: "text" as const, text }],

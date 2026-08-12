@@ -2739,7 +2739,7 @@ function renderProjectMemory(
     // Estimate lifetime savings: ~1KB per event → ~256 tokens/event at Opus rates,
     // plus current session's already-tracked token savings (in-memory).
     const lifetimeTokens = lifeEvents * 256 + sessionTokensSaved;
-    out.push(`  ${fmtNum(lifeEvents)} events · ${sessionLabel} · ~${tokensToUsd(lifetimeTokens)} saved lifetime`);
+    out.push(`  ${fmtNum(lifeEvents)} events · ${sessionLabel} · ~${fmtNum(lifetimeTokens)} tokens est. saved lifetime`);
   }
   out.push("");
 
@@ -2807,17 +2807,15 @@ function renderAutoMemory(lifetime: LifetimeStats | undefined): string[] {
 /** Render the closing "Bottom line" footer (Bug #8). */
 function renderBottomLine(sessionTokensSaved: number, lifetime: LifetimeStats | undefined): string[] {
   const out: string[] = [];
-  const sessionUsd = tokensToUsd(sessionTokensSaved);
   // Lifetime = disk-aggregated events × 256 tokens + current session's
   // in-memory token savings. Two pipelines unified at the render edge so
-  // lifetime ≥ session always (never the surprising "$X session · $0 lifetime"
+  // lifetime ≥ session always (never the surprising "X session · 0 lifetime"
   // a fresh user sees pre-flush).
   const lifetimeTokens = (lifetime?.totalEvents ?? 0) * 256 + sessionTokensSaved;
-  const lifetimeUsd = tokensToUsd(lifetimeTokens);
   out.push("");
   out.push("─".repeat(65));
   out.push("Your AI talks less, remembers more, costs less.");
-  out.push(`${sessionUsd} this session  ·  ${lifetimeUsd} lifetime`);
+  out.push(`~${fmtNum(sessionTokensSaved)} tokens est. this session  ·  ~${fmtNum(lifetimeTokens)} tokens est. lifetime`);
   out.push("─".repeat(65));
   return out;
 }
@@ -3120,10 +3118,12 @@ export function formatReport(
 
   // ── Active session: visual savings dashboard ──
 
-  // Line 1: Hero metric — the screenshottable number
-  // Bug #6: include Opus pricing on the hero line for credibility.
+  // Line 1: Hero metric — the screenshottable number. Bytes are the
+  // measured ground truth; tokensSaved is a labeled estimate (see
+  // src/session/token-estimate.ts). No dollar figure -- that was an
+  // estimate priced at a hardcoded fallback rate, three assumptions deep.
   lines.push(
-    `${fmtNum(tokensSaved)} tokens saved  ·  ${savingsPct.toFixed(1)}% reduction  ·  ${duration}  ·  ~${tokensToUsd(tokensSaved)} saved (Opus)`,
+    `${kb(totalKeptOut)} kept out  ·  ~${fmtNum(tokensSaved)} tokens est.  ·  ${savingsPct.toFixed(1)}% reduction  ·  ${duration}`,
   );
   lines.push("");
 
