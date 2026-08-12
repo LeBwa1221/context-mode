@@ -9,7 +9,7 @@
  */
 
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import { loadDatabase, applyWALPragmas, closeDB, cleanOrphanedWALFiles, withRetry, deleteDBFiles, isSQLiteCorruptionError, checkpointWALPassive } from "./db-base.js";
+import { loadDatabase, applyWALPragmas, closeDB, cleanOrphanedWALFiles, withRetry, deleteDBFiles, isSQLiteCorruptionError, startWalCheckpointTimer } from "./db-base.js";
 import type { PreparedStatement } from "./db-base.js";
 import { readFileSync, readdirSync, unlinkSync, existsSync, statSync, openSync, fstatSync, closeSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -403,9 +403,8 @@ export class ContentStore {
   // search performance. SQLite's built-in 'optimize' merges b-tree segments.
   #insertCount = 0;
   static readonly OPTIMIZE_EVERY = 50;
-  // maint/global-store: opportunistic PASSIVE WAL checkpoint cadence. See
-  // checkpointWALPassive() call site in #insertChunks below.
-  static readonly CHECKPOINT_EVERY = 10;
+  /** Stops the opportunistic PASSIVE WAL checkpoint timer (#985); null when off. */
+  #checkpointStop: (() => void) | null = null;
 
   // Fuzzy correction cache (process-local LRU). fuzzyCorrect() hits the vocab
   // DB and runs levenshtein against every candidate within length tolerance,
@@ -448,6 +447,8 @@ export class ContentStore {
 
   /** Delete this session's DB files. Call on process exit. */
   cleanup(): void {
+    this.#checkpointStop?.();
+    this.#checkpointStop = null;
     try {
       this.#db.close();
     } catch { /* ignore */ }
@@ -1082,13 +1083,6 @@ export class ContentStore {
     if (this.#insertCount % ContentStore.OPTIMIZE_EVERY === 0) {
       this.#optimizeFTS();
     }
-    // maint/global-store: opportunistic PASSIVE WAL checkpoint so a
-    // long-running shared/global store's -wal file stays bounded (a
-    // real-world install was observed at 19.7MB). More frequent than
-    // OPTIMIZE_EVERY since checkpointing is cheap and non-blocking.
-    if (this.#insertCount % ContentStore.CHECKPOINT_EVERY === 0) {
-      checkpointWALPassive(this.#db);
-    }
 
     return {
       sourceId,
@@ -1621,7 +1615,21 @@ export class ContentStore {
     } catch { /* best effort — don't block indexing */ }
   }
 
+  /**
+   * Begin opportunistic PASSIVE WAL checkpoints (#985). The server calls
+   * this for the shared content store so the WAL stays bounded even when
+   * the process is killed before close() can run its TRUNCATE checkpoint.
+   * Idempotent — a second call replaces the prior timer. Stopped by
+   * close()/cleanup().
+   */
+  startCheckpointTimer(intervalMs: number): void {
+    this.#checkpointStop?.();
+    this.#checkpointStop = startWalCheckpointTimer(this.#db, intervalMs);
+  }
+
   close(): void {
+    this.#checkpointStop?.();
+    this.#checkpointStop = null;
     this.#optimizeFTS(); // defragment before close
     closeDB(this.#db); // WAL checkpoint before close — important for persistent DBs
   }

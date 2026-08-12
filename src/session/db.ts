@@ -6,7 +6,7 @@
  * the shared package.
  */
 
-import { SQLiteBase, defaultDBPath, adoptLargestLegacyDb, checkpointWALPassive } from "../db-base.js";
+import { SQLiteBase, defaultDBPath, adoptLargestLegacyDb, startWalCheckpointTimer } from "../db-base.js";
 import type { PreparedStatement } from "../db-base.js";
 import type { SessionEvent } from "../types.js";
 import type { ProjectAttribution } from "./project-attribution.js";
@@ -825,20 +825,33 @@ export class SessionDB extends SQLiteBase {
    */
   private declare stmts: Map<string, PreparedStatement>;
 
-  // maint/global-store: opportunistic PASSIVE WAL checkpoint cadence — see
-  // checkpointWALPassive() call sites in insertEvent()/insertEvents() below.
-  #insertCount = 0;
-  static readonly CHECKPOINT_EVERY = 20;
+  // maint/global-store: opportunistic PASSIVE WAL checkpoint (#985, design
+  // from upstream PR #988 by @alove20) so a long-running shared/global
+  // store's -wal file stays bounded. Time-based, not write-count-based:
+  // see startWalCheckpointTimer's doc comment for why. Self-started here
+  // (rather than at a server.ts call site, as ContentStore's is) since
+  // SessionDB has no single central factory to hook. Same
+  // CONTEXT_MODE_WAL_CHECKPOINT_MS knob as ContentStore.
+  #checkpointStop: (() => void) | null = null;
 
   constructor(opts?: { dbPath?: string }) {
     super(opts?.dbPath ?? defaultDBPath("session"));
+    const raw = process.env.CONTEXT_MODE_WAL_CHECKPOINT_MS;
+    this.#checkpointStop = startWalCheckpointTimer(this.db, raw === undefined ? 60000 : Number(raw));
   }
 
-  #maybeCheckpointWAL(): void {
-    this.#insertCount++;
-    if (this.#insertCount % SessionDB.CHECKPOINT_EVERY === 0) {
-      checkpointWALPassive(this.db);
-    }
+  /** Stop the checkpoint timer and delegate to SQLiteBase.close(). */
+  override close(): void {
+    this.#checkpointStop?.();
+    this.#checkpointStop = null;
+    super.close();
+  }
+
+  /** Stop the checkpoint timer and delegate to SQLiteBase.cleanup(). */
+  override cleanup(): void {
+    this.#checkpointStop?.();
+    this.#checkpointStop = null;
+    super.cleanup();
   }
 
   /** Shorthand to retrieve a cached statement. */
@@ -1242,7 +1255,6 @@ export class SessionDB extends SQLiteBase {
     // contract) instead of upgrading mid-transaction, where it can lose a
     // race under concurrent hook writers.
     this.withRetry(() => transaction.immediate());
-    this.#maybeCheckpointWAL();
   }
 
   /**
@@ -1342,7 +1354,6 @@ export class SessionDB extends SQLiteBase {
 
     // .immediate() — see insertEvent() above.
     this.withRetry(() => transaction.immediate());
-    this.#maybeCheckpointWAL();
   }
 
   /**

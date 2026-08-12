@@ -367,20 +367,39 @@ export function applyWALPragmas(db: DatabaseInstance): void {
 }
 
 /**
- * Opportunistically checkpoint the WAL back into the main DB file with
- * PASSIVE mode (upstream issues #985 / #988). PASSIVE never blocks readers
- * or writers and simply checkpoints as many frames as it safely can right
- * now — unlike TRUNCATE (used at close, see `closeDB`), it's safe to call
- * from a live multi-writer connection mid-session.
+ * Start a periodic PASSIVE WAL checkpoint on `db`, returning a stop function.
+ * Design and implementation from upstream PR #988 by @alove20 (issue #985).
  *
- * Without periodic checkpointing, a long-running shared/global store's
- * `-wal` file grows unbounded (a real-world install was observed at
- * 19.7MB). Callers invoke this every N writes via their own counter
- * (mirrors ContentStore's existing FTS5 `OPTIMIZE_EVERY` pattern) rather
- * than on every write, since a checkpoint attempt is not free.
+ * `closeDB()`'s `wal_checkpoint(TRUNCATE)` is the only WAL-truncation path,
+ * and it only runs on graceful shutdown. A server killed hard (crash,
+ * reboot, SIGKILL, or a Windows parent-death before the lifecycle guard
+ * fires) never reaches it, so under multi-session load a shared store's WAL
+ * can grow unbounded (a real-world install was observed at 19.7MB). A
+ * PASSIVE checkpoint reclaims whatever WAL frames it can between reader
+ * gaps; it never blocks and touches no locking, so it stays within
+ * ADR-0001's multi-writer contract (no EXCLUSIVE, no lockfile).
+ *
+ * Time-based rather than write-count-based on purpose: a count-based
+ * trigger never fires again once a session goes idle mid-count, leaving an
+ * unbounded WAL behind for exactly the idle-but-alive sessions a shared
+ * global store makes common. The timer is `.unref()`'d so it never keeps
+ * the event loop alive. A non-positive or non-finite interval disables it
+ * and returns a no-op stopper.
  */
-export function checkpointWALPassive(db: DatabaseInstance): void {
-  try { db.pragma("wal_checkpoint(PASSIVE)"); } catch { /* best effort */ }
+export function startWalCheckpointTimer(
+  db: DatabaseInstance,
+  intervalMs: number,
+): () => void {
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) return () => {};
+  const timer = setInterval(() => {
+    try {
+      db.pragma("wal_checkpoint(PASSIVE)");
+    } catch {
+      /* best-effort — a busy or closing DB just retries next tick */
+    }
+  }, intervalMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
 }
 
 // ─────────────────────────────────────────────────────────
@@ -472,17 +491,27 @@ function blockingSleep(ms: number): void {
   Atomics.wait(_sleepBuf, 0, 0, ms);
 }
 
-/** Errors worth retrying: lock contention (SQLITE_BUSY) and transient I/O
- * errors (SQLITE_IOERR -- issues #992, #1030) that can surface under
- * concurrent access to a network/shared filesystem. Corruption errors
- * (SQLITE_CORRUPT, SQLITE_NOTADB) are NOT included -- those need
- * isSQLiteCorruptionError's rename-and-recreate path, not a retry. */
+/**
+ * Error substrings that indicate a *transient* SQLite failure worth
+ * retrying: lock contention (SQLITE_BUSY) and transient I/O errors
+ * (SQLITE_IOERR / "disk I/O error" -- issues #992, #1030; PR #1030 by
+ * @halindrome). SQLITE_IOERR is deliberately included: filesystem
+ * pressure, a WAL hiccup, or a network/shared-filesystem blip previously
+ * fell into a gap here (no retry) and were also not corruption (no
+ * recovery via isSQLiteCorruptionError either), so one I/O stall
+ * hard-failed the caller. Corruption errors (SQLITE_CORRUPT, SQLITE_NOTADB)
+ * are NOT included here -- those need isSQLiteCorruptionError's
+ * rename-and-recreate path, not a retry.
+ */
+const TRANSIENT_ERROR_PATTERNS = [
+  "SQLITE_BUSY",
+  "database is locked",
+  "SQLITE_IOERR",
+  "disk I/O error",
+];
+
 function isRetryableDbError(msg: string): boolean {
-  return (
-    msg.includes("SQLITE_BUSY") ||
-    msg.includes("database is locked") ||
-    msg.includes("SQLITE_IOERR")
-  );
+  return TRANSIENT_ERROR_PATTERNS.some((p) => msg.includes(p));
 }
 
 /**
@@ -490,7 +519,9 @@ function isRetryableDbError(msg: string): boolean {
  * SQLITE_IOERR errors. Retries up to 3 times with delays: 100ms, 500ms,
  * 2000ms, blocking synchronously between attempts (see `blockingSleep`)
  * rather than busy-waiting. If all retries fail, throws a descriptive
- * error. Pass custom delays for testing (e.g., [0, 0, 0] to skip waits).
+ * error naming the actual class of failure exhausted (reporting "database
+ * is locked" for an I/O failure would send the caller after the wrong root
+ * cause). Pass custom delays for testing (e.g., [0, 0, 0] to skip waits).
  */
 export function withRetry<T>(fn: () => T, delays: number[] = [100, 500, 2000]): T {
   let lastError: Error | undefined;
@@ -508,8 +539,12 @@ export function withRetry<T>(fn: () => T, delays: number[] = [100, 500, 2000]): 
       }
     }
   }
+  const failure = lastError?.message ?? "";
+  const cause = failure.includes("SQLITE_IOERR") || failure.includes("disk I/O error")
+    ? "SQLITE_IOERR: disk I/O error"
+    : "SQLITE_BUSY: database is locked";
   throw new Error(
-    `SQLITE_BUSY: database is locked after ${delays.length} retries. ` +
+    `${cause} after ${delays.length} retries. ` +
     `Original error: ${lastError?.message}`
   );
 }
