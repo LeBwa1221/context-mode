@@ -2028,26 +2028,13 @@ server.registerTool(
       idempotentHint: false,
       openWorldHint: true,
     },
-    description: `Read a file into a sandboxed FILE_CONTENT variable and run code over it. Only what you console.log() enters your conversation — the file bytes stay in the sandbox.
+    description: `Read a file into a sandboxed FILE_CONTENT variable and run code over it. Only what you console.log() enters your conversation — the file bytes stay in the sandbox. Same principle as ctx_execute, scoped to one named file.
 
-Think-in-Code applied to file-level analysis: Reading the whole file means every byte enters your conversation memory and costs reasoning capacity for the rest of the session. Running code over it here lets you keep the raw bytes out and only the derived answer in. Same principle as ctx_execute, scoped to one named file via the FILE_CONTENT variable.
+Use when you want to know something ABOUT a large or structured file (line count, pattern matches, parsed structure, aggregate) without needing to SEE all of it.
 
-WHEN:
-  - You want to KNOW SOMETHING ABOUT a file (line count, matches of a pattern, parsed structure, statistical aggregate) without needing to SEE all of it
-  - The file is structured (CSV, JSON, log, code) and a code-level derivation is cheaper than reading verbatim
-  - The file is large enough that reading the full content would burn meaningful conversation memory you need for the actual work
-  - The derivation may itself produce a large output you want recall-by-topic on later — pass an \`intent\` string; outputs over ~5KB are auto-indexed and only matching sections come back, retrievable via ctx_search
+WHEN NOT: you intend to EDIT the file — use Read so the subsequent Edit can match exact text. Also use Read for a small file or a known offset/line.
 
-WHEN NOT:
-  - You intend to EDIT the file — use Read so the subsequent Edit can match the exact text
-  - You only need one specific line and you know its offset — Read with offset/limit is the simplest path
-  - The file is small AND you will consume all of it for understanding/editing — Read directly
-
-RETURNS:
-  Only what your code prints. The FILE_CONTENT variable holds the raw bytes inside the sandbox; nothing else leaves. When \`intent\` is set and output exceeds the auto-index threshold, the response carries searchable section titles + previews instead of the raw stdout.
-
-EXAMPLE: ctx_execute_file(path: "huge.log", language: "javascript", code: "const errs = FILE_CONTENT.split('\\\\n').filter(l => /ERROR|FATAL/.test(l)); console.log(\`\${errs.length} error lines\`); console.log(errs.slice(-5).join('\\\\n'))")
-EXAMPLE: ctx_execute_file(path: "data.csv", language: "javascript", code: "const rows = FILE_CONTENT.split('\\\\n'); console.log(\`rows: \${rows.length - 1}, header: \${rows[0]}\`)")`,
+intent: a search string — when output exceeds ~5KB it's auto-indexed and you get section titles/previews instead of raw text; follow up with ctx_search.`,
     inputSchema: z.object({
       path: z
         .string()
@@ -2076,13 +2063,12 @@ EXAMPLE: ctx_execute_file(path: "data.csv", language: "javascript", code: "const
       timeout: z
         .coerce.number()
         .optional()
-        .describe("Max execution time in ms. When omitted, no server-side timer fires — the MCP host's RPC timeout governs."),
+        .describe("Max execution time in ms. Omit to use the MCP host's RPC timeout."),
       intent: z
         .string()
         .optional()
         .describe(
-          "What you're looking for in the output. When provided and output is large (>5KB), " +
-          "returns only matching sections via BM25 search instead of truncated output.",
+          "What you're looking for. When output exceeds ~5KB, returns matching sections via BM25 search instead of raw output.",
         ),
     }),
   },
