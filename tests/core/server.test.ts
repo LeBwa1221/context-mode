@@ -5792,11 +5792,14 @@ describe("hook routing prompt-surface contract (#683 ADR-0002 + ADR-0003)", () =
 
     const caseAs = extractCaseAStrings(routingMjs);
 
-    test("at least 4 CASE A redirect strings present (sanity check on extractor)", () => {
-      // Current corpus: L707 curl/wget, L738 inline HTTP, L751 build tools,
-      // L804 WebFetch. If a contributor removes one, the count drops and
-      // this sanity check forces the test author to revisit the extractor.
-      expect(caseAs.length).toBeGreaterThanOrEqual(4);
+    test("at least 3 CASE A redirect strings present (sanity check on extractor)", () => {
+      // Current corpus: L707 curl/wget, L738 inline HTTP, L751 build tools.
+      // WebFetch was downgraded from a deny/redirect to an advisory nudge
+      // (#927/#1006/#984/#1037) and no longer opens with "redirected", so it
+      // is intentionally excluded from CASE A now. If a contributor removes
+      // one of the remaining three, the count drops and this sanity check
+      // forces the test author to revisit the extractor.
+      expect(caseAs.length).toBeGreaterThanOrEqual(3);
     });
 
     for (const cs of caseAs) {

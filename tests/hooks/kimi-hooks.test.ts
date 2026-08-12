@@ -122,7 +122,10 @@ describe("Kimi Code hooks", () => {
       expect(parsed.hookSpecificOutput.updatedInput).toBeUndefined();
     });
 
-    test("returns deny JSON for WebFetch", () => {
+    test("passthrough for WebFetch — advisory nudge has no Kimi output channel", () => {
+      // WebFetch was downgraded from a hard deny to an advisory (#927/#1006/
+      // #984/#1037). Kimi's deny-only runner has no additionalContext field,
+      // so the "context" action is silently dropped, same as "modify".
       const result = runHook("pretooluse.mjs", {
         hook_event_name: "PreToolUse",
         cwd: tempDir,
@@ -132,7 +135,7 @@ describe("Kimi Code hooks", () => {
 
       expect(result.exitCode).toBe(0);
       const parsed = JSON.parse(result.stdout);
-      expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(parsed.hookSpecificOutput.permissionDecision).toBeUndefined();
     });
 
     test("exits 0 for git commands (allowed short-output shell)", () => {

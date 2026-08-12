@@ -396,6 +396,7 @@ describe("routePreToolUse", () => {
     });
 
     it("treats agy read_url_content URL payloads as WebFetch", () => {
+      resetGuidanceThrottle("agy-read-url");
       const url = "https://example.com/docs";
       const result = routePreToolUse(
         "read_url_content",
@@ -432,6 +433,7 @@ describe("routePreToolUse", () => {
 
     it("only nudges once per session, not on every call (#1026-style cadence)", () => {
       const sessionId = "webfetch-cadence-test";
+      resetGuidanceThrottle(sessionId);
       const first = routePreToolUse("WebFetch", { url: "https://example.com" }, undefined, "claude-code", sessionId);
       const second = routePreToolUse("WebFetch", { url: "https://example.com" }, undefined, "claude-code", sessionId);
       expect(first).not.toBeNull();
@@ -474,6 +476,7 @@ describe("routePreToolUse", () => {
     });
 
     it("keeps the WebFetch advisory when options are omitted", () => {
+      resetGuidanceThrottle("main-webfetch-default-options");
       const result = routePreToolUse(
         "WebFetch",
         { url: "https://example.com" },
@@ -487,6 +490,7 @@ describe("routePreToolUse", () => {
     });
 
     it("Claude Code pretooluse treats subagent hook payloads as ctx_* unavailable (#794)", async () => {
+      resetGuidanceThrottle("core-routing-main-webfetch");
       const main = await spawnPreToolUseHook({
         tool_name: "WebFetch",
         tool_input: { url: "https://example.com" },

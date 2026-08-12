@@ -11,6 +11,7 @@ import { mkdtempSync, rmSync, existsSync, unlinkSync, writeFileSync } from "node
 import { createHash } from "node:crypto";
 import { tmpdir, homedir } from "node:os";
 import { fakeHome, realHome } from "../setup-home";
+import { resetGuidanceThrottle } from "../../hooks/core/routing.mjs";
 
 
 const _hashCanonical = (p: string) => createHash("sha256").update(
@@ -111,6 +112,7 @@ describe("Cursor hooks", () => {
     // #984/#1037) - it's now allowed through, with a periodic nudge toward
     // the sandbox instead of a block.
     test("nudges WebFetch toward the sandbox without blocking it", () => {
+      resetGuidanceThrottle("cursor-hook-pre-2");
       const result = runHook("pretooluse.mjs", {
         tool_name: "WebFetch",
         tool_input: { url: "https://example.com" },
@@ -126,6 +128,7 @@ describe("Cursor hooks", () => {
     });
 
     test("nudges mcp_web_fetch toward the same sandbox redirect", () => {
+      resetGuidanceThrottle("cursor-hook-pre-3");
       const result = runHook("pretooluse.mjs", {
         tool_name: "mcp_web_fetch",
         tool_input: { url: "https://example.com" },
@@ -141,6 +144,7 @@ describe("Cursor hooks", () => {
     });
 
     test("nudges mcp_fetch_tool toward the same sandbox redirect", () => {
+      resetGuidanceThrottle("cursor-hook-pre-4");
       const result = runHook("pretooluse.mjs", {
         tool_name: "mcp_fetch_tool",
         tool_input: { url: "https://example.com" },

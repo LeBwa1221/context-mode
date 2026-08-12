@@ -344,12 +344,12 @@ describe("routePreToolUse with platform parameter", () => {
     expect(cmd).not.toContain("mcp__");
   });
 
-  it("WebFetch deny uses kiro tool names when platform=kiro", () => {
+  it("WebFetch advisory uses kiro tool names when platform=kiro", () => {
     const result = routePreToolUse("WebFetch", { url: "https://example.com" }, "/tmp", "kiro");
     expect(result).not.toBeNull();
-    expect(result!.action).toBe("deny");
-    expect(result!.reason).toContain("@context-mode/ctx_fetch_and_index");
-    expect(result!.reason).toContain("@context-mode/ctx_search");
+    expect(result!.action).toBe("context");
+    expect(result!.additionalContext).toContain("@context-mode/ctx_fetch_and_index");
+    expect(result!.additionalContext).toContain("@context-mode/ctx_search");
   });
 
   it("Task is no longer routed — returns null (#241)", () => {
@@ -442,7 +442,7 @@ describe("routePreToolUse with platform parameter", () => {
       );
     });
 
-    it("web_fetch routes as WebFetch → deny", () => {
+    it("web_fetch routes as WebFetch → advisory context nudge", () => {
       const result = routePreToolUse(
         "web_fetch",
         { url: "https://example.com" },
@@ -450,8 +450,8 @@ describe("routePreToolUse with platform parameter", () => {
         "qwen-code",
       );
       expect(result).not.toBeNull();
-      expect(result!.action).toBe("deny");
-      expect(result!.reason).toContain("WebFetch redirected");
+      expect(result!.action).toBe("context");
+      expect(result!.additionalContext).toContain("ctx_fetch_and_index");
     });
 
     it("read_file routes as Read → context guidance", () => {

@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 
 import { loadDatabase } from "../../src/db-base.js";
+import { resetGuidanceThrottle } from "../../hooks/core/routing.mjs";
 
 
 const _hashCanonical = (p: string) => createHash("sha256").update(
@@ -87,6 +88,10 @@ describe("D2 Phase 4 — webfetch-redirected marker pattern", () => {
     writeFileSync(mcpSentinel, String(process.pid));
     const m = resolve(tmpdir(), `context-mode-redirect-${sessionId}.txt`);
     try { unlinkSync(m); } catch {}
+    // WebFetch nudge is periodic now (guidancePeriodic, keyed by sessionId) -
+    // reset its counter too, or a leftover count from a prior run makes the
+    // advisory (and its redirectMeta) skip firing on this test's first call.
+    resetGuidanceThrottle(sessionId);
   });
 
   afterEach(() => {
