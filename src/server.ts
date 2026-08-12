@@ -5097,7 +5097,7 @@ async function main() {
   // Restore tool-call counters from SessionDB BEFORE the heartbeat fires
   // so the very first persistStats() carries the prior PID's totals into
   // the sidecar JSON the statusline reads. Otherwise `/ctx-upgrade` flashes
-  // `0 calls / $0.00` until the user makes another MCP tool call. Wrapped
+  // `0 calls / 0 tokens` until the user makes another MCP tool call. Wrapped
   // in try/catch — a stats-restore failure must never block server startup.
   try {
     const restored = restoreSessionStats(getSessionDbPath());
