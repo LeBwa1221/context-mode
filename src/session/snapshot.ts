@@ -9,8 +9,10 @@
  * contains a natural summary plus a runnable search tool call that retrieves
  * full details from the indexed knowledge base on demand.
  *
- * Zero truncation. Zero information loss. Full data lives in SessionDB;
- * the snapshot is a table of contents.
+ * Full data lives in SessionDB; the snapshot is a table of contents, and is
+ * bounded so it stays under the host's injected-context cap. Summaries are
+ * truncated, never the underlying record: each section ships the search call
+ * that retrieves its full events on demand.
  */
 
 import { escapeXML } from "../truncate.js";
@@ -27,7 +29,7 @@ export interface StoredEvent {
 }
 
 export interface BuildSnapshotOpts {
-  maxBytes?: number;      // KEPT for backward compat but IGNORED
+  maxBytes?: number;      // total snapshot budget; see DEFAULT_MAX_BYTES
   compactCount?: number;
   searchTool?: string;    // platform-specific tool name, default "ctx_search"
 }
@@ -35,6 +37,57 @@ export interface BuildSnapshotOpts {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 const MAX_ACTIVE_FILES = 10;
+
+/**
+ * Hosts cap hook-injected context and silently swap the payload for a file
+ * path plus a preview once it is exceeded (Claude Code: 10,000 characters on
+ * hookSpecificOutput.additionalContext). An over-budget snapshot therefore
+ * loses *everything*, not just its tail, and does so without an error — the
+ * exact failure this snapshot exists to prevent. Stay under the cap.
+ */
+const DEFAULT_MAX_BYTES = 8000;
+
+/** Per-section item cap — a section is a table of contents, not a transcript. */
+const MAX_SECTION_ITEMS = 12;
+
+/** Per-item payload cap. Full text stays in SessionDB, reachable via search. */
+const MAX_ITEM_CHARS = 200;
+
+/**
+ * Reduce raw events to bounded, de-duplicated summary lines.
+ *
+ * Every section builder used to emit `ev.data` verbatim for every event, so a
+ * long session produced a snapshot far larger than the host would accept. The
+ * caller keeps the search tool call, which is what actually retrieves detail.
+ */
+function summarizeEvents(
+  events: StoredEvent[],
+  format: (ev: StoredEvent, body: string) => string,
+): { lines: string[]; queryTerms: string[]; elided: number } {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  const queryTerms: string[] = [];
+
+  // Newest events carry the most resume value, so keep the tail.
+  for (const ev of events.slice().reverse()) {
+    const raw = ev.data ?? "";
+    if (!raw || seen.has(raw)) continue;
+    seen.add(raw);
+    if (lines.length >= MAX_SECTION_ITEMS) continue;
+    lines.push(format(ev, escapeXML(truncateForSnapshot(raw, MAX_ITEM_CHARS))));
+    queryTerms.push(raw);
+  }
+
+  lines.reverse();
+  return { lines, queryTerms, elided: Math.max(0, seen.size - lines.length) };
+}
+
+/** Render the "N more, search for them" footer a bounded section needs. */
+function elidedNote(elided: number): string[] {
+  return elided > 0
+    ? [`    (+${elided} more — use the search call below to retrieve them)`]
+    : [];
+}
 
 /**
  * Extract 2-4 keyword phrases from a list of strings for BM25 search queries.
@@ -114,18 +167,16 @@ function buildFilesSection(fileEvents: StoredEvent[], searchTool: string): strin
 function buildErrorsSection(errorEvents: StoredEvent[], searchTool: string): string {
   if (errorEvents.length === 0) return "";
 
-  const summaryLines: string[] = [];
-  const queryTerms: string[] = [];
-
-  for (const ev of errorEvents) {
-    summaryLines.push(`    ${escapeXML(ev.data)}`);
-    queryTerms.push(ev.data);
-  }
+  const { lines: summaryLines, queryTerms, elided } = summarizeEvents(
+    errorEvents,
+    (_ev, body) => `    ${body}`,
+  );
 
   const queries = buildQueries(queryTerms);
   const lines = [
     `  <errors count="${errorEvents.length}">`,
     ...summaryLines,
+    ...elidedNote(elided),
     toolCall(searchTool, queries),
     `  </errors>`,
   ];
@@ -135,23 +186,18 @@ function buildErrorsSection(errorEvents: StoredEvent[], searchTool: string): str
 function buildDecisionsSection(decisionEvents: StoredEvent[], searchTool: string): string {
   if (decisionEvents.length === 0) return "";
 
-  const seen = new Set<string>();
-  const summaryLines: string[] = [];
-  const queryTerms: string[] = [];
-
-  for (const ev of decisionEvents) {
-    if (seen.has(ev.data)) continue;
-    seen.add(ev.data);
-    summaryLines.push(`    ${escapeXML(ev.data)}`);
-    queryTerms.push(ev.data);
-  }
+  const { lines: summaryLines, queryTerms, elided } = summarizeEvents(
+    decisionEvents,
+    (_ev, body) => `    ${body}`,
+  );
 
   if (summaryLines.length === 0) return "";
 
   const queries = buildQueries(queryTerms);
   const lines = [
-    `  <decisions count="${summaryLines.length}">`,
+    `  <decisions count="${summaryLines.length + elided}">`,
     ...summaryLines,
+    ...elidedNote(elided),
     toolCall(searchTool, queries),
     `  </decisions>`,
   ];
@@ -161,28 +207,21 @@ function buildDecisionsSection(decisionEvents: StoredEvent[], searchTool: string
 function buildRulesSection(ruleEvents: StoredEvent[], searchTool: string): string {
   if (ruleEvents.length === 0) return "";
 
-  const seen = new Set<string>();
-  const summaryLines: string[] = [];
-  const queryTerms: string[] = [];
-
-  for (const ev of ruleEvents) {
-    if (seen.has(ev.data)) continue;
-    seen.add(ev.data);
-
-    if (ev.type === "rule_content") {
-      summaryLines.push(`    ${escapeXML(ev.data)}`);
-    } else {
-      summaryLines.push(`    ${escapeXML(ev.data)}`);
-    }
-    queryTerms.push(ev.data);
-  }
+  // `rule_content` used to take its own branch here, but both branches emitted
+  // the identical line (#1004) — and inlining a rule body verbatim duplicated
+  // guidance the host already injects. One bounded form covers both.
+  const { lines: summaryLines, queryTerms, elided } = summarizeEvents(
+    ruleEvents,
+    (_ev, body) => `    ${body}`,
+  );
 
   if (summaryLines.length === 0) return "";
 
   const queries = buildQueries(queryTerms);
   const lines = [
-    `  <rules count="${summaryLines.length}">`,
+    `  <rules count="${summaryLines.length + elided}">`,
     ...summaryLines,
+    ...elidedNote(elided),
     toolCall(searchTool, queries),
     `  </rules>`,
   ];
@@ -192,18 +231,16 @@ function buildRulesSection(ruleEvents: StoredEvent[], searchTool: string): strin
 function buildGitSection(gitEvents: StoredEvent[], searchTool: string): string {
   if (gitEvents.length === 0) return "";
 
-  const summaryLines: string[] = [];
-  const queryTerms: string[] = [];
-
-  for (const ev of gitEvents) {
-    summaryLines.push(`    ${escapeXML(ev.data)}`);
-    queryTerms.push(ev.data);
-  }
+  const { lines: summaryLines, queryTerms, elided } = summarizeEvents(
+    gitEvents,
+    (_ev, body) => `    ${body}`,
+  );
 
   const queries = buildQueries(queryTerms);
   const lines = [
     `  <git count="${gitEvents.length}">`,
     ...summaryLines,
+    ...elidedNote(elided),
     toolCall(searchTool, queries),
     `  </git>`,
   ];
@@ -321,21 +358,23 @@ function buildEnvironmentSection(
 function buildSubagentsSection(subagentEvents: StoredEvent[], searchTool: string): string {
   if (subagentEvents.length === 0) return "";
 
-  const summaryLines: string[] = [];
-  const queryTerms: string[] = [];
+  // Subagent payloads are whole delegated transcripts — the single largest
+  // contributor to an unbounded snapshot. Summarize hard; search retrieves.
+  const { lines: summaryLines, queryTerms, elided } = summarizeEvents(
+    subagentEvents,
+    (ev, body) => {
+      const status = ev.type === "subagent_completed" ? "completed"
+        : ev.type === "subagent_launched" ? "launched"
+        : "unknown";
+      return `    [${status}] ${body}`;
+    },
+  );
 
-  for (const ev of subagentEvents) {
-    const status = ev.type === "subagent_completed" ? "completed"
-      : ev.type === "subagent_launched" ? "launched"
-      : "unknown";
-    summaryLines.push(`    [${status}] ${escapeXML(ev.data)}`);
-    queryTerms.push(`subagent ${ev.data}`);
-  }
-
-  const queries = buildQueries(queryTerms);
+  const queries = buildQueries(queryTerms.map(t => `subagent ${t}`));
   const lines = [
     `  <subagents count="${subagentEvents.length}">`,
     ...summaryLines,
+    ...elidedNote(elided),
     toolCall(searchTool, queries),
     `  </subagents>`,
   ];
@@ -373,23 +412,18 @@ function buildSkillsSection(skillEvents: StoredEvent[], searchTool: string): str
 function buildRolesSection(roleEvents: StoredEvent[], searchTool: string): string {
   if (roleEvents.length === 0) return "";
 
-  const seen = new Set<string>();
-  const summaryLines: string[] = [];
-  const queryTerms: string[] = [];
-
-  for (const ev of roleEvents) {
-    if (seen.has(ev.data)) continue;
-    seen.add(ev.data);
-    summaryLines.push(`    ${escapeXML(ev.data)}`);
-    queryTerms.push(ev.data);
-  }
+  const { lines: summaryLines, queryTerms, elided } = summarizeEvents(
+    roleEvents,
+    (_ev, body) => `    ${body}`,
+  );
 
   if (summaryLines.length === 0) return "";
 
   const queries = buildQueries(queryTerms);
   const lines = [
-    `  <roles count="${summaryLines.length}">`,
+    `  <roles count="${summaryLines.length + elided}">`,
     ...summaryLines,
+    ...elidedNote(elided),
     toolCall(searchTool, queries),
     `  </roles>`,
   ];
@@ -465,9 +499,13 @@ function buildRecentMessagesSection(userPromptEvents: StoredEvent[]): string {
  *
  * Algorithm:
  * 1. Group events by category
- * 2. For each non-empty category, build a summary section with a runnable
- *    search tool call containing exact queries for full details
- * 3. Assemble ALL non-empty sections — no priority dropping, no byte budget
+ * 2. For each non-empty category, build a bounded summary section with a
+ *    runnable search tool call containing exact queries for full details
+ * 3. Assemble sections most-valuable-first, stopping at `maxBytes`
+ *
+ * Detail is never lost: every section carries the search call that retrieves
+ * the full events from SessionDB. What the budget drops is the *summary*, and
+ * dropping the least valuable summary beats having the host discard all of it.
  */
 export function buildResumeSnapshot(
   events: StoredEvent[],
@@ -475,6 +513,7 @@ export function buildResumeSnapshot(
 ): string {
   const compactCount = opts?.compactCount ?? 1;
   const searchTool = opts?.searchTool ?? "ctx_search";
+  const maxBytes = opts?.maxBytes ?? DEFAULT_MAX_BYTES;
   const now = new Date().toISOString();
 
   // ── Group events by category ──
@@ -512,62 +551,56 @@ export function buildResumeSnapshot(
     }
   }
 
-  // ── Build all sections ──
-  const sections: string[] = [];
-
-  // How-to-search instruction block (always present)
-  sections.push(`  <how_to_search>
+  // ── Build sections, most valuable on resume first ──
+  // `pinned` sections survive the byte budget: without them a resumed session
+  // does not know what it was doing. Everything else yields in listed order.
+  const howToSearch = `  <how_to_search>
   Each section below contains a summary of prior work.
   For FULL DETAILS, run the exact tool call shown under each section.
   Do NOT ask the user to re-explain prior work. Search first.
   Do NOT invent your own queries — use the ones provided.
-  </how_to_search>`);
+  </how_to_search>`;
 
-  // Session goal first — the objective the LLM must keep working toward.
-  const goal = buildGoalSection(goalEvents);
-  if (goal) sections.push(goal);
+  const candidates: Array<{ body: string; pinned?: boolean }> = [
+    { body: howToSearch, pinned: true },
+    { body: buildGoalSection(goalEvents), pinned: true },
+    { body: buildTaskSection(taskEvents, searchTool), pinned: true },
+    { body: buildRecentMessagesSection(userPromptEvents), pinned: true },
+    { body: buildDecisionsSection(decisionEvents, searchTool) },
+    { body: buildErrorsSection(errorEvents, searchTool) },
+    { body: buildRulesSection(ruleEvents, searchTool) },
+    { body: buildFilesSection(fileEvents, searchTool) },
+    { body: buildEnvironmentSection(cwdEvents, envEvents, searchTool) },
+    { body: buildGitSection(gitEvents, searchTool) },
+    { body: buildSubagentsSection(subagentEvents, searchTool) },
+    { body: buildSkillsSection(skillEvents, searchTool) },
+    { body: buildRolesSection(roleEvents, searchTool) },
+    { body: buildIntentSection(intentEvents) },
+  ];
 
-  const files = buildFilesSection(fileEvents, searchTool);
-  if (files) sections.push(files);
-
-  const errors = buildErrorsSection(errorEvents, searchTool);
-  if (errors) sections.push(errors);
-
-  const decisions = buildDecisionsSection(decisionEvents, searchTool);
-  if (decisions) sections.push(decisions);
-
-  const rules = buildRulesSection(ruleEvents, searchTool);
-  if (rules) sections.push(rules);
-
-  const git = buildGitSection(gitEvents, searchTool);
-  if (git) sections.push(git);
-
-  const tasks = buildTaskSection(taskEvents, searchTool);
-  if (tasks) sections.push(tasks);
-
-  const environment = buildEnvironmentSection(cwdEvents, envEvents, searchTool);
-  if (environment) sections.push(environment);
-
-  const subagents = buildSubagentsSection(subagentEvents, searchTool);
-  if (subagents) sections.push(subagents);
-
-  const skills = buildSkillsSection(skillEvents, searchTool);
-  if (skills) sections.push(skills);
-
-  const roles = buildRolesSection(roleEvents, searchTool);
-  if (roles) sections.push(roles);
-
-  const intent = buildIntentSection(intentEvents);
-  if (intent) sections.push(intent);
-
-  // Raw-prompt safety net — always last so it stays adjacent to the next
-  // LLM turn and is read after the structured sections.
-  const recentMessages = buildRecentMessagesSection(userPromptEvents);
-  if (recentMessages) sections.push(recentMessages);
-
-  // ── Assemble ──
   const header = `<session_resume events="${events.length}" compact_count="${compactCount}" generated_at="${now}">`;
   const footer = `</session_resume>`;
+
+  const sections: string[] = [];
+  let used = header.length + footer.length + 4;
+  let dropped = 0;
+
+  for (const { body, pinned } of candidates) {
+    if (!body) continue;
+    const cost = body.length + 2;
+    if (!pinned && used + cost > maxBytes) {
+      dropped++;
+      continue;
+    }
+    sections.push(body);
+    used += cost;
+  }
+
+  if (dropped > 0) {
+    sections.push(
+      `  <elided sections="${dropped}">Lower-priority summaries omitted to stay within the host's injected-context limit. Their events remain searchable via ${escapeXML(searchTool)}.</elided>`,
+    );
+  }
 
   const body = sections.join("\n\n");
   if (body) {
