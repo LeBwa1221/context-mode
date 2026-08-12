@@ -440,16 +440,6 @@ describe("routePreToolUse", () => {
       expect(second).toBeNull();
     });
 
-    it("suppresses the nudge entirely via CONTEXT_MODE_SUPPRESS_WEBFETCH_NUDGE", () => {
-      process.env.CONTEXT_MODE_SUPPRESS_WEBFETCH_NUDGE = "1";
-      try {
-        const result = routePreToolUse("WebFetch", { url: "https://example.com" });
-        expect(result).toBeNull();
-      } finally {
-        delete process.env.CONTEXT_MODE_SUPPRESS_WEBFETCH_NUDGE;
-      }
-    });
-
     it("allows WebFetch when MCP server not ready (#230)", () => {
       // Remove sentinel to simulate MCP not started
       try { unlinkSync(mcpSentinel); } catch {}

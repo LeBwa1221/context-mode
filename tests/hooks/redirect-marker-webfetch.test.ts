@@ -1,14 +1,17 @@
 /**
- * D2 PRD Phase 4 — webfetch-redirected marker pattern (slices 4.1–4.3).
- *
- * Mirrors the Bash redirect marker tests but for the WebFetch deny path
- * in routing.mjs. Default bytes_avoided = 16384 (typical web page body).
+ * WebFetch was downgraded from a hard deny+redirect to a one-shot advisory
+ * nudge (#927/#1006/#984/#1037). It no longer denies the call, so nothing
+ * is actually kept out of context — asserting bytes_avoided for it would be
+ * dishonest accounting (the model can ignore the nudge and WebFetch still
+ * runs). These tests assert the redirect-marker/webfetch-redirected event
+ * path is NOT triggered by WebFetch anymore; it stays live for tools that
+ * are still real denies (curl/wget, Bash inline-HTTP — see other suites).
  */
 
 import { describe, test, beforeAll, beforeEach, afterAll, afterEach, expect } from "vitest";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdtempSync, rmSync, mkdirSync } from "node:fs";
+import { writeFileSync, existsSync, unlinkSync, mkdtempSync, rmSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -52,7 +55,7 @@ function readEvents(dbPath: string, sessionId: string, type: string): RawEventRo
 const mcpSentinelDir = process.platform === "win32" ? tmpdir() : "/tmp";
 const mcpSentinel = resolve(mcpSentinelDir, `context-mode-mcp-ready-${process.pid}`);
 
-describe("D2 Phase 4 — webfetch-redirected marker pattern", () => {
+describe("WebFetch advisory does not emit a redirect/webfetch-redirected marker", () => {
   let fakeHome: string;
   let fakeProject: string;
   let env: Record<string, string>;
@@ -88,9 +91,9 @@ describe("D2 Phase 4 — webfetch-redirected marker pattern", () => {
     writeFileSync(mcpSentinel, String(process.pid));
     const m = resolve(tmpdir(), `context-mode-redirect-${sessionId}.txt`);
     try { unlinkSync(m); } catch {}
-    // WebFetch nudge is periodic now (guidancePeriodic, keyed by sessionId) -
-    // reset its counter too, or a leftover count from a prior run makes the
-    // advisory (and its redirectMeta) skip firing on this test's first call.
+    // WebFetch nudge fires once per session (guidanceOnce, keyed by sessionId) -
+    // reset its marker too, or a leftover marker from a prior run suppresses
+    // it on this test's first call.
     resetGuidanceThrottle(sessionId);
   });
 
@@ -125,43 +128,20 @@ describe("D2 Phase 4 — webfetch-redirected marker pattern", () => {
     });
   }
 
-  // ─── Slice 4.1 ───────────────────────────────────────────
-  test("4.1: PreToolUse writes redirect marker on WebFetch", () => {
+  test("PreToolUse does not write a redirect marker on WebFetch (advisory only)", () => {
     const r = runPre("https://docs.example.com/long-page");
     assert.equal(r.status, 0, `pretooluse non-zero. stderr: ${r.stderr}`);
 
     const markerPath = resolve(tmpdir(), `context-mode-redirect-${sessionId}.txt`);
-    assert.ok(existsSync(markerPath), "marker file must be written");
-    const content = readFileSync(markerPath, "utf-8");
-    expect(content.startsWith("WebFetch:webfetch-redirected:16384:")).toBe(true);
-    expect(content).toContain("https://docs.example.com");
+    assert.ok(!existsSync(markerPath), "advisory nudge must not write a redirect marker");
   });
 
-  // ─── Slice 4.2 ───────────────────────────────────────────
-  test("4.2: PostToolUse emits webfetch-redirected event with bytes_avoided=16384", () => {
+  test("PostToolUse does not emit a webfetch-redirected event", () => {
     runPre("https://example.com/article");
-    const post = runPost("WebFetch", { url: "https://example.com/article" }, "denied");
+    const post = runPost("WebFetch", { url: "https://example.com/article" }, "the page body");
     assert.equal(post.status, 0, `posttooluse non-zero. stderr: ${post.stderr}`);
 
     const rows = readEvents(dbPath, sessionId, "webfetch-redirected");
-    expect(rows.length).toBeGreaterThanOrEqual(1);
-    expect(rows[0].category).toBe("redirect");
-    expect(rows[0].bytes_avoided).toBe(16384);
-    expect(rows[0].bytes_returned).toBe(0);
-    expect(rows[0].data).toContain("WebFetch:");
-  });
-
-  // ─── Slice 4.3 ───────────────────────────────────────────
-  test("4.3: long URL truncated to 200 chars in marker", () => {
-    const longUrl = "https://example.com/" + "a".repeat(500);
-    runPre(longUrl);
-    const markerPath = resolve(tmpdir(), `context-mode-redirect-${sessionId}.txt`);
-    const content = readFileSync(markerPath, "utf-8");
-    const i1 = content.indexOf(":");
-    const i2 = content.indexOf(":", i1 + 1);
-    const i3 = content.indexOf(":", i2 + 1);
-    const summary = content.slice(i3 + 1);
-    expect(summary.length).toBeLessThanOrEqual(200);
-    expect(summary.length).toBeGreaterThan(0);
+    expect(rows.length).toBe(0);
   });
 });
