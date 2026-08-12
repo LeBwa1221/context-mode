@@ -6,7 +6,7 @@
  * the shared package.
  */
 
-import { SQLiteBase, defaultDBPath, adoptLargestLegacyDb } from "../db-base.js";
+import { SQLiteBase, defaultDBPath, adoptLargestLegacyDb, checkpointWALPassive } from "../db-base.js";
 import type { PreparedStatement } from "../db-base.js";
 import type { SessionEvent } from "../types.js";
 import type { ProjectAttribution } from "./project-attribution.js";
@@ -825,8 +825,20 @@ export class SessionDB extends SQLiteBase {
    */
   private declare stmts: Map<string, PreparedStatement>;
 
+  // maint/global-store: opportunistic PASSIVE WAL checkpoint cadence — see
+  // checkpointWALPassive() call sites in insertEvent()/insertEvents() below.
+  #insertCount = 0;
+  static readonly CHECKPOINT_EVERY = 20;
+
   constructor(opts?: { dbPath?: string }) {
     super(opts?.dbPath ?? defaultDBPath("session"));
+  }
+
+  #maybeCheckpointWAL(): void {
+    this.#insertCount++;
+    if (this.#insertCount % SessionDB.CHECKPOINT_EVERY === 0) {
+      checkpointWALPassive(this.db);
+    }
   }
 
   /** Shorthand to retrieve a cached statement. */
@@ -1226,7 +1238,11 @@ export class SessionDB extends SQLiteBase {
       this.stmt(S.updateMetaLastEvent).run(sessionId);
     });
 
-    this.withRetry(() => transaction());
+    // .immediate() acquires the write lock at BEGIN (ADR-0001 multi-writer
+    // contract) instead of upgrading mid-transaction, where it can lose a
+    // race under concurrent hook writers.
+    this.withRetry(() => transaction.immediate());
+    this.#maybeCheckpointWAL();
   }
 
   /**
@@ -1324,7 +1340,9 @@ export class SessionDB extends SQLiteBase {
       this.stmt(S.updateMetaLastEvent).run(sessionId);
     });
 
-    this.withRetry(() => transaction());
+    // .immediate() — see insertEvent() above.
+    this.withRetry(() => transaction.immediate());
+    this.#maybeCheckpointWAL();
   }
 
   /**

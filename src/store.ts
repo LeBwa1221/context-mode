@@ -9,7 +9,7 @@
  */
 
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import { loadDatabase, applyWALPragmas, closeDB, cleanOrphanedWALFiles, withRetry, deleteDBFiles, isSQLiteCorruptionError } from "./db-base.js";
+import { loadDatabase, applyWALPragmas, closeDB, cleanOrphanedWALFiles, withRetry, deleteDBFiles, isSQLiteCorruptionError, checkpointWALPassive } from "./db-base.js";
 import type { PreparedStatement } from "./db-base.js";
 import { readFileSync, readdirSync, unlinkSync, existsSync, statSync, openSync, fstatSync, closeSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -229,24 +229,19 @@ export function cleanupStaleContentDBs(contentDir: string, maxAgeDays: number): 
       try {
         const filePath = join(contentDir, file);
         const mtime = statSync(filePath).mtimeMs;
-        let shouldClean = mtime < cutoff;
+        const shouldClean = mtime < cutoff;
 
-        // Detect zombie processes holding WAL locks:
-        // If a WAL file exists, try to read the WAL header to extract the PID.
-        // WAL files from dead processes can block new connections.
-        if (!shouldClean) {
-          const walPath = filePath + "-wal";
-          if (existsSync(walPath)) {
-            try {
-              const walStat = statSync(walPath);
-              // If WAL file is non-empty and DB hasn't been modified in >1 hour,
-              // the owning process may be dead — check via mtime staleness
-              if (walStat.size > 0 && (Date.now() - walStat.mtimeMs) > 3600_000) {
-                shouldClean = true;
-              }
-            } catch { /* ignore WAL check errors */ }
-          }
-        }
+        // maint/global-store (issue #1024): a "WAL non-empty + idle >1hr ⇒
+        // zombie" heuristic used to live here. It's unsound: a live session
+        // with a connection open but no recent writes is idle-but-alive,
+        // not dead, and WAL emptiness says nothing about process liveness —
+        // deleting its DB out from under it loses data. Now that the store
+        // is global (a shared root, not per-profile), an idle session here
+        // is the COMMON case, not the exception, so this false-positive
+        // risk got worse, not better. mtime-vs-cutoff on the main DB file
+        // (`shouldClean` above) is the only signal here; a real crash-zombie
+        // WAL is instead handled defensively at connection-open time via
+        // cleanOrphanedWALFiles()/isSQLiteCorruptionError() (db-base.ts).
 
         if (shouldClean) {
           for (const suffix of ["", "-wal", "-shm"]) {
@@ -408,6 +403,9 @@ export class ContentStore {
   // search performance. SQLite's built-in 'optimize' merges b-tree segments.
   #insertCount = 0;
   static readonly OPTIMIZE_EVERY = 50;
+  // maint/global-store: opportunistic PASSIVE WAL checkpoint cadence. See
+  // checkpointWALPassive() call site in #insertChunks below.
+  static readonly CHECKPOINT_EVERY = 10;
 
   // Fuzzy correction cache (process-local LRU). fuzzyCorrect() hits the vocab
   // DB and runs levenshtein against every candidate within length tolerance,
@@ -1069,7 +1067,11 @@ export class ContentStore {
       return sourceId;
     });
 
-    const sourceId = transaction();
+    // .immediate() acquires the write lock at BEGIN instead of at the first
+    // write statement (ADR-0001 multi-writer contract): under concurrent
+    // writers, a DEFERRED transaction can lose a read-then-upgrade race and
+    // surface SQLITE_BUSY mid-transaction after already doing work.
+    const sourceId = transaction.immediate();
     if (text) this.#extractAndStoreVocabulary(text);
 
     // Periodically optimize FTS5 indexes to merge b-tree segments.
@@ -1079,6 +1081,13 @@ export class ContentStore {
     this.#insertCount++;
     if (this.#insertCount % ContentStore.OPTIMIZE_EVERY === 0) {
       this.#optimizeFTS();
+    }
+    // maint/global-store: opportunistic PASSIVE WAL checkpoint so a
+    // long-running shared/global store's -wal file stays bounded (a
+    // real-world install was observed at 19.7MB). More frequent than
+    // OPTIMIZE_EVERY since checkpointing is cheap and non-blocking.
+    if (this.#insertCount % ContentStore.CHECKPOINT_EVERY === 0) {
+      checkpointWALPassive(this.#db);
     }
 
     return {

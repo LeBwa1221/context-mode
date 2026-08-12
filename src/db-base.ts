@@ -163,9 +163,13 @@ export class NodeSQLiteAdapter {
   }
 
   transaction(fn: (...args: any[]) => any): any {
-    // node:sqlite has no transaction() method — manual BEGIN/COMMIT/ROLLBACK
-    return (...args: any[]) => {
-      this.#raw.exec("BEGIN");
+    // node:sqlite has no transaction() method — manual BEGIN/COMMIT/ROLLBACK.
+    // Mirrors better-sqlite3's/bun:sqlite's .deferred()/.immediate()/
+    // .exclusive() sub-functions on the returned callable so ADR-0001
+    // multi-writer call sites (ContentStore, SessionDB) can request
+    // `BEGIN IMMEDIATE` without branching on which SQLite backend loaded.
+    const run = (beginStmt: string) => (...args: any[]) => {
+      this.#raw.exec(beginStmt);
       try {
         const result = fn(...args);
         this.#raw.exec("COMMIT");
@@ -175,6 +179,11 @@ export class NodeSQLiteAdapter {
         throw err;
       }
     };
+    const deferred: any = run("BEGIN DEFERRED");
+    deferred.deferred = deferred;
+    deferred.immediate = run("BEGIN IMMEDIATE");
+    deferred.exclusive = run("BEGIN EXCLUSIVE");
+    return deferred;
   }
 
   close(): void {
@@ -357,6 +366,23 @@ export function applyWALPragmas(db: DatabaseInstance): void {
   // See docs/adr/0001-sessiondb-multi-writer.md for the v1.0.130 ADR.
 }
 
+/**
+ * Opportunistically checkpoint the WAL back into the main DB file with
+ * PASSIVE mode (upstream issues #985 / #988). PASSIVE never blocks readers
+ * or writers and simply checkpoints as many frames as it safely can right
+ * now — unlike TRUNCATE (used at close, see `closeDB`), it's safe to call
+ * from a live multi-writer connection mid-session.
+ *
+ * Without periodic checkpointing, a long-running shared/global store's
+ * `-wal` file grows unbounded (a real-world install was observed at
+ * 19.7MB). Callers invoke this every N writes via their own counter
+ * (mirrors ContentStore's existing FTS5 `OPTIMIZE_EVERY` pattern) rather
+ * than on every write, since a checkpoint attempt is not free.
+ */
+export function checkpointWALPassive(db: DatabaseInstance): void {
+  try { db.pragma("wal_checkpoint(PASSIVE)"); } catch { /* best effort */ }
+}
+
 // ─────────────────────────────────────────────────────────
 // DB file helpers
 // ─────────────────────────────────────────────────────────
@@ -422,12 +448,49 @@ export function defaultDBPath(prefix: string = "context-mode"): string {
 // Retry helper
 // ─────────────────────────────────────────────────────────
 
+// Backing buffer for the blocking-sleep trick below. A single shared Int32Array
+// slot that is never notified, so Atomics.wait() simply blocks the calling
+// thread for the timeout -- a synchronous sleep with no CPU spin. Module-level
+// singleton: the buffer's contents are never read, only used as a wait target.
+const _sleepBuf = new Int32Array(new SharedArrayBuffer(4));
+
 /**
- * Retry a DB operation with exponential backoff on SQLITE_BUSY errors.
- * Catches errors containing "SQLITE_BUSY" or "database is locked" and
- * retries up to 3 times with delays: 100ms, 500ms, 2000ms.
- * If all retries fail, throws a descriptive error.
- * Pass custom delays for testing (e.g., [0, 0, 0] to skip waits).
+ * Synchronously block the CURRENT thread for `ms` milliseconds without
+ * spinning the CPU. Replaces a `while (Date.now() - start < delay) {}`
+ * busy-wait (upstream issue #985 / PR #986) -- under real multi-writer
+ * contention that spin pins a core per waiting connection and starves the
+ * writer it's waiting on. `Atomics.wait` parks the thread with the OS
+ * scheduler instead.
+ *
+ * Only valid off the main thread's microtask assumptions -- fine here since
+ * withRetry() is used from synchronous better-sqlite3/bun:sqlite/node:sqlite
+ * call sites, which block the event loop for the duration of the query
+ * anyway.
+ */
+function blockingSleep(ms: number): void {
+  if (ms <= 0) return;
+  Atomics.wait(_sleepBuf, 0, 0, ms);
+}
+
+/** Errors worth retrying: lock contention (SQLITE_BUSY) and transient I/O
+ * errors (SQLITE_IOERR -- issues #992, #1030) that can surface under
+ * concurrent access to a network/shared filesystem. Corruption errors
+ * (SQLITE_CORRUPT, SQLITE_NOTADB) are NOT included -- those need
+ * isSQLiteCorruptionError's rename-and-recreate path, not a retry. */
+function isRetryableDbError(msg: string): boolean {
+  return (
+    msg.includes("SQLITE_BUSY") ||
+    msg.includes("database is locked") ||
+    msg.includes("SQLITE_IOERR")
+  );
+}
+
+/**
+ * Retry a DB operation with exponential backoff on transient SQLITE_BUSY /
+ * SQLITE_IOERR errors. Retries up to 3 times with delays: 100ms, 500ms,
+ * 2000ms, blocking synchronously between attempts (see `blockingSleep`)
+ * rather than busy-waiting. If all retries fail, throws a descriptive
+ * error. Pass custom delays for testing (e.g., [0, 0, 0] to skip waits).
  */
 export function withRetry<T>(fn: () => T, delays: number[] = [100, 500, 2000]): T {
   let lastError: Error | undefined;
@@ -436,14 +499,12 @@ export function withRetry<T>(fn: () => T, delays: number[] = [100, 500, 2000]): 
       return fn();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (!msg.includes("SQLITE_BUSY") && !msg.includes("database is locked")) {
+      if (!isRetryableDbError(msg)) {
         throw err;
       }
       lastError = err instanceof Error ? err : new Error(msg);
       if (attempt < delays.length) {
-        const delay = delays[attempt];
-        const start = Date.now();
-        while (Date.now() - start < delay) { /* busy-wait for sync retry */ }
+        blockingSleep(delays[attempt]);
       }
     }
   }
