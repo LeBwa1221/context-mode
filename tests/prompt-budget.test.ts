@@ -7,40 +7,55 @@ import { createSubagentPointer } from "../hooks/routing-block.mjs";
 import { createToolNamer } from "../hooks/core/tool-naming.mjs";
 
 /**
- * Regression guard for the MCP prompt budget (maint/prompt-diet).
+ * Regression guard for the MCP prompt budget (maint/prompt-diet, 2026-08-12).
  *
  * Two things are paid on every request regardless of what the agent is
  * doing: the MCP tool schemas (tools/list, sent once per session but
  * re-sent on every reconnect) and the SessionStart routing block (once per
  * session, and previously once per subagent spawn too). Both were audited
- * pre-diet: ~29,959 bytes of tool schemas (~8.3K tokens) and a ~4.8KB
+ * pre-diet: 29,959 bytes of tool schemas (~8.3K tokens) and a ~4.6KB
  * routing block injected into the main session AND every subagent spawn.
  *
- * This guard boots the built server, calls tools/list over stdio exactly
- * like a real MCP client would, and sums JSON.stringify(tool).length across
- * every tool - the same measurement approach used to size the diet. It
- * fails if descriptions get re-inflated past the budget.
+ * MEASUREMENT METHOD (must match exactly, or numbers will not reconcile -
+ * see the CONTEXT_MODE_PROJECT_DIR note below for why this bit us once):
+ *   1. Build the bundle first: `npm run bundle`. This guard spawns the
+ *      COMMITTED server.bundle.mjs, not src/server.ts - a stale bundle
+ *      makes this guard (and the running server) exercise old behavior.
+ *   2. Speak MCP over stdio exactly like a real client: initialize,
+ *      notifications/initialized, tools/list.
+ *   3. Sum JSON.stringify(tool).length across every tool in the response.
+ *      This is the literal byte count re-sent on every reconnect - the
+ *      same approach used to size the diet, so before/after figures are
+ *      comparable.
+ *
+ * PRE-DIET BASELINE: 29,959 bytes. Measured against server.bundle.mjs at
+ * commit b3b84fc (before this branch's changes), CONTEXT_MODE_PROJECT_DIR
+ * unset, no other CONTEXT_MODE_* env vars set.
+ *
+ * KNOWN SOURCE OF VARIANCE: CONTEXT_MODE_PLATFORM has NO effect on this
+ * total - the MCP server always returns bare tool names in tools/list
+ * (`server.registerTool("ctx_execute", ...)`); host-side prefixing (e.g.
+ * claude-code's mcp__plugin_context-mode_context-mode__ctx_execute) is
+ * applied by the CLIENT when presenting tools to the model and never
+ * appears in the tools/list JSON payload this guard measures. What DOES
+ * matter: CONTEXT_MODE_PROJECT_DIR (shared-DB mode) adds a "project" field
+ * to ctx_search's schema - a real ~176-byte difference between the default
+ * per-project mode and shared-DB mode. This guard measures shared-DB mode
+ * (below) because it is the worst case; any bound that holds there holds
+ * for the smaller default mode too.
+ *
+ * The guard asserts a REDUCTION RATIO against the recorded baseline rather
+ * than an absolute byte count. An absolute number needs manual re-tuning
+ * every time a legitimate field is added and silently drifts away from the
+ * actual invariant ("at least 50% smaller than baseline"); the ratio states
+ * that invariant directly and cannot go stale for cosmetic reasons.
  */
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SERVER_BUNDLE = resolve(ROOT, "server.bundle.mjs");
 
-// Pre-diet baseline was 29,959 bytes measured with a bare per-project DB
-// (CONTEXT_MODE_PROJECT_DIR unset). In shared-DB mode (CONTEXT_MODE_PROJECT_DIR
-// set) ctx_search's schema grows a "project" field, which is a legitimate
-// deployment mode, not an accident - so this guard measures THAT mode: it is
-// the worst case for schema size and any budget that holds for it holds for
-// the default mode too. Worst case landed at 14,715 (-50.9%).
-//
-// The threshold is pinned to the 50%-reduction line itself (half of 29,959,
-// rounded down), not an arbitrary round number - a schema total under this
-// line is by definition at least a 50% cut. That leaves ~264 bytes of
-// deliberate headroom above the current worst-case total for a genuine
-// future field or clarifying sentence, without permitting drift back toward
-// the old total. Tool descriptions also embed live runtime detection
-// (available language interpreters, Bun presence) which varies a few dozen
-// bytes across machines; this headroom absorbs that too.
-const TOOL_SCHEMA_BUDGET = 14_979;
+const PRE_DIET_BASELINE_BYTES = 29_959;
+const MIN_REDUCTION_RATIO = 0.5; // "at least 50% smaller than baseline"
 
 function listTools(env: NodeJS.ProcessEnv = {}): Promise<Array<{ name: string; description?: string }>> {
   return new Promise((resolvePromise, reject) => {
@@ -90,11 +105,12 @@ function listTools(env: NodeJS.ProcessEnv = {}): Promise<Array<{ name: string; d
 }
 
 describe("MCP tool schema prompt budget (maint/prompt-diet)", () => {
-  it(`total tools/list payload stays under ${TOOL_SCHEMA_BUDGET} bytes in shared-DB mode (worst case)`, async () => {
+  it(`stays at least ${MIN_REDUCTION_RATIO * 100}% smaller than the ${PRE_DIET_BASELINE_BYTES}-byte pre-diet baseline, in shared-DB mode (worst case)`, async () => {
     const tools = await listTools({ CONTEXT_MODE_PROJECT_DIR: ROOT });
     expect(tools.length).toBeGreaterThanOrEqual(11);
     const total = tools.reduce((sum, t) => sum + JSON.stringify(t).length, 0);
-    expect(total).toBeLessThan(TOOL_SCHEMA_BUDGET);
+    const reduction = 1 - total / PRE_DIET_BASELINE_BYTES;
+    expect(reduction, `total=${total}b, reduction=${(reduction * 100).toFixed(1)}%`).toBeGreaterThanOrEqual(MIN_REDUCTION_RATIO);
   }, 20_000);
 
   it("default per-project mode is smaller than shared-DB mode", async () => {
