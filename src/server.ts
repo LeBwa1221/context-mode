@@ -69,7 +69,7 @@ import { getHookScriptPaths } from "./util/hook-config.js";
 import { stripJsonComments } from "./util/jsonc.js";
 import { resolveClaudeConfigDir } from "./util/claude-config.js";
 import { resolveProjectDir } from "./util/project-dir.js";
-import { loadDatabase } from "./db-base.js";
+import { loadDatabase, hasModernSqlite } from "./db-base.js";
 import { AnalyticsEngine, formatReport, getConversationStats, getContentBytesAllSessions, getConversationWindowStats, getLifetimeStats, getMultiAdapterLifetimeStats, getRealBytesStats, pricePerToken } from "./session/analytics.js";
 const __pkg_dir = dirname(fileURLToPath(import.meta.url));
 const VERSION: string = (() => {
@@ -1006,6 +1006,32 @@ let _lifetimeCache: { tokens: number; computedAt: number } | undefined;
 const SESSION_ID_RE = /^[A-Za-z0-9._-]+$/;
 function sanitizeSessionId(raw: string): string {
   return SESSION_ID_RE.test(raw) ? raw : `pid-${process.ppid}`;
+}
+
+/**
+ * Runtime status — factual only, no speed claims. hasBunRuntime() elsewhere
+ * in this file ("3-5x faster") is unsubstantiated for the hook path:
+ * tools/bench-hooks.mjs measured Bun SLOWER than Node for every hook type on
+ * Windows (see hooks/hook-runtime.mjs). No cross-platform hook data exists,
+ * and no data at all exists for server/sandbox throughput, so this reports
+ * what's active instead of asserting a win.
+ */
+function getRuntimeStatusLines(): string[] {
+  const isBun = typeof (globalThis as any).Bun !== "undefined";
+  const serverRuntime = isBun ? `Bun ${(globalThis as any).Bun.version}` : `Node ${process.version}`;
+  const sqliteDriver = isBun
+    ? "bun:sqlite"
+    : hasModernSqlite()
+      ? "node:sqlite (falls back to better-sqlite3 if FTS5 is unavailable)"
+      : "better-sqlite3";
+  const hookMode = process.env.CONTEXT_MODE_HOOK_RUNTIME || "auto";
+  const bunOnPath = hasBunRuntime();
+  return [
+    `Server runtime: ${serverRuntime}`,
+    `SQLite driver: ${sqliteDriver}`,
+    `Bun on PATH: ${bunOnPath ? "yes" : "no"}`,
+    `Hook runtime mode: ${hookMode} (${process.platform === "win32" ? "hooks default to Node on Windows - measured faster than Bun for hook execution, see tools/bench-hooks.mjs" : "override with CONTEXT_MODE_HOOK_RUNTIME=bun|node"})`,
+  ];
 }
 
 function getStatsFilePath(): string {
@@ -4129,6 +4155,8 @@ server.registerTool(
       text = formatReport(report, VERSION, _latestVersion, (lifetime || multiAdapter) ? { lifetime, multiAdapter } : undefined);
     }
 
+    text += "\n\n" + getRuntimeStatusLines().map((l) => `  ${l}`).join("\n");
+
     return trackResponse("ctx_stats", {
       content: [{ type: "text" as const, text }],
     });
@@ -4179,11 +4207,9 @@ server.registerTool(
     const pct = ((available.length / total) * 100).toFixed(0);
     lines.push(`[OK] Runtimes: ${available.length}/${total} (${pct}%) — ${available.join(", ")}`);
 
-    // Performance
-    if (hasBunRuntime()) {
-      lines.push("[OK] Performance: FAST (Bun)");
-    } else {
-      lines.push("[WARN] Performance: NORMAL — install Bun for 3-5x speed boost");
+    // Runtime status — factual, no speed claims (see getRuntimeStatusLines).
+    for (const line of getRuntimeStatusLines()) {
+      lines.push(`[OK] ${line}`);
     }
 
     const sessionStorage = resolveSessionStorageDir(getDefaultSessionDir);
