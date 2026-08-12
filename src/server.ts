@@ -4346,29 +4346,13 @@ server.registerTool(
     },
     description: `DESTRUCTIVE: permanently delete indexed content. Cannot be undone. Requires confirm:true and exactly one scope.
 
-WHEN:
-  - User explicitly asks to clear a specific session ('purge this session', 'wipe this conversation')
-  - User explicitly asks to reset the whole project ('reset everything', 'wipe the knowledge base')
-
-WHEN NOT:
-  - User says 'reset', 'clear', or 'wipe' without naming a scope -> ask which scope before calling
-  - User wants to free memory or improve performance -> recommend ctx_stats first, do not purge
+Only call when the user explicitly names a scope ('purge this session', 'reset everything'). If they say 'reset'/'clear'/'wipe' without a scope, ask which one first. If they want to free memory or improve performance, recommend ctx_stats instead — do not purge.
 
 SCOPES (pass exactly one):
-  - Per-session: ctx_purge(confirm: true, sessionId: "<uuid>") deletes that session's events (auto-captured decisions, errors, plans, user prompts, rejected approaches, etc.) and per-session FTS5 chunks; sibling sessions and stats file are preserved.
-  - Per-project: ctx_purge(confirm: true, scope: "project") wipes FTS5 knowledge base, every session DB row, events markdown, and resets the stats file. Use ctx_stats first to preview category counts before purging.
+  - sessionId: "<uuid>" — deletes that session's events + FTS5 chunks; siblings and stats preserved.
+  - scope: "project" — wipes the entire knowledge base, all sessions, and the stats file. Preview with ctx_stats first.
 
-CONTRACT:
-  - confirm:true is required; confirm:false returns 'purge cancelled'.
-  - sessionId and scope:'project' together return 'ambiguous - pick one'.
-  - scope:'session' without sessionId throws (sessionId required).
-  - Bare {confirm:true} is deprecated: maps to scope:'project' with a stderr warning; will hard-error in a future major.
-
-RETURNS:
-  A summary of removed rows + the resolved scope.
-
-EXAMPLE: ctx_purge(confirm: true, sessionId: "7c8a-1234-5678-9abc-def012345678")
-EXAMPLE: ctx_purge(confirm: true, scope: "project")`,
+confirm:false returns 'purge cancelled'. sessionId + scope:'project' together is ambiguous — pick one. Bare {confirm:true} defaults to scope:'project' (deprecated).`,
     // NOTE: schema MUST be a plain z.object — no .refine()/.transform()/
     // .superRefine() wrapper. See block comment above & issue #563. The
     // cross-field ambiguity check lives in the handler body below.
