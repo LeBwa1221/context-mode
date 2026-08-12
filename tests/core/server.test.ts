@@ -3010,21 +3010,13 @@ describe("batch_execute FS read tracking", () => {
   });
 
   test("tool description documents the concurrency field with positive guidance", () => {
-    // PR #683 / ADR-0002: emoji bullets replaced with prose. The standalone
-    // CONCURRENCY: section was folded into WHEN: / WHEN NOT: prose by the
-    // PR #683 WS3 canonical-structure pass so descriptions only carry the
-    // four canonical sections (WHEN / WHEN NOT / RETURNS / EXAMPLE) plus
-    // approved per-tool carve-outs (e.g. ctx_purge SCOPES / CONTRACT).
-    // The I/O-bound vs CPU-bound split and the 4-8 speedup window are still
-    // named — the PR #683 second amendment then deepened the concurrency
-    // guidance (CPU-bound stays at 1, GitHub API caps at 4 to respect rate
-    // limits, I/O-bound uses 4-8). This test pins the load-bearing concepts
-    // (I/O-bound parallelism, the 4-8 window, the keep-at-1 rule) not the
-    // exact prose so future copy-edits don't break it.
-    expect(serverSrc).toMatch(/parallelize I\/O-bound (work|calls|batches)/);
-    expect(serverSrc).toMatch(/4-8\s+(for I\/O-bound|I\/O-bound batches)/);
-    expect(serverSrc).toContain("CPU-bound or stateful");
-    expect(serverSrc).toContain("keep concurrency at 1");
+    // Prompt-diet pass (maint/prompt-diet): the concurrency guidance was
+    // trimmed to fit the MCP tool-schema token budget. This test now pins
+    // the load-bearing concept (keep concurrency at 1 for CPU-bound/stateful
+    // commands) rather than the exact 4-8/I-O-bound phrasing, which moved to
+    // skills/context-mode/SKILL.md.
+    expect(serverSrc).toMatch(/[Kk]eep at 1 for CPU-bound/);
+    expect(serverSrc).toContain("ports, locks");
   });
 });
 
@@ -3583,8 +3575,8 @@ describe("ctx_fetch_and_index batch refactor", () => {
     expect(fetchBlockMatch).not.toBeNull();
     const block = fetchBlockMatch![0];
     expect(block).toContain("ttl: z");
-    expect(block).toContain("Override the cache freshness window");
-    expect(block).toContain("`ttl: 0` bypasses the cache like `force: true`");
+    expect(block).toContain("Override the cache TTL");
+    expect(block).toContain("`ttl: 0` bypasses cache like `force: true`");
     expect(block).toContain("async ({ url, source, requests, concurrency, force, ttl })");
     expect(block).toContain("fetchOneUrl(req.url, req.source, force, ttl)");
   });
@@ -3613,8 +3605,10 @@ describe("ctx_fetch_and_index batch refactor", () => {
     // 4-8 I/O window, FTS5 serial-write contract) using semantic regexes
     // so future copy-edits don't break it.
     expect(fetchHandlerSrc).toMatch(/requests(:\s*\[|`\s*array)/);
-    expect(fetchHandlerSrc).toMatch(/4-8\s+(for|stable)/);
-    expect(fetchHandlerSrc).toMatch(/FTS5[^.]*(serializes? writes?|write phase[^.]*serial|single-writer)/);
+    expect(fetchHandlerSrc).toMatch(/concurrency.{0,3}2-8/);
+    // Prompt-diet pass: the FTS5 single-writer explanation moved to the
+    // serial-write contract test below (source comments), no longer
+    // duplicated in the user-facing description.
   });
 
   test("serial-write contract: index drain is a for-loop calling indexFetched serially", () => {
@@ -5336,11 +5330,28 @@ describe("tool description style contract (#683 ADR-0002)", () => {
   // - ctx_upgrade: MUST is appropriate here (post-call obligation on the
   //   agent to run the returned shell command). Audit row: "LOW — MUST is
   //   appropriate here (post-call obligation), good use case. No change."
+  // Prompt-diet pass (maint/prompt-diet, see hooks/routing-block.mjs env
+  // knob work in the same branch): MCP tool schemas are paid on every
+  // request (~8.3K tokens measured pre-diet). The canonical WHEN/RETURNS/
+  // EXAMPLE structure this contract enforced was audited as correct for
+  // tool-selection quality, but RETURNS/EXAMPLE duplicated content that
+  // already lives in skills/context-mode/SKILL.md (loaded on demand, not
+  // on every request) and cost real per-call budget. These seven tools
+  // still open with a WHEN NOT: disambiguation section (kept — it's the
+  // sibling-tool selection cue that matters for routing), just without
+  // the RETURNS:/EXAMPLE: sections. Worked examples moved to the skill.
   const EXEMPT_FROM_WHEN = new Set([
     "ctx_stats",
     "ctx_doctor",
     "ctx_insight",
     "ctx_upgrade",
+    "ctx_execute",
+    "ctx_execute_file",
+    "ctx_index",
+    "ctx_search",
+    "ctx_fetch_and_index",
+    "ctx_batch_execute",
+    "ctx_purge",
   ]);
 
   // ctx_purge carve-out — the rewrite (PR #683 WS2) preserves the
@@ -6391,7 +6402,7 @@ describe("ctx_batch_execute query_scope (issue #696)", () => {
   });
 
   test("schema describes both scope semantics", () => {
-    expect(serverSrc).toMatch(/query_scope[\s\S]{0,2000}searches ONLY the chunks/i);
+    expect(serverSrc).toMatch(/query_scope[\s\S]{0,2000}batch's output/i);
     expect(serverSrc).toMatch(/query_scope[\s\S]{0,2000}searches the entire persistent index/i);
   });
 
@@ -6437,7 +6448,9 @@ describe("ctx_search progressive throttle observability (issue #697)", () => {
   });
 
   test("ctx_search description documents the throttle policy", () => {
-    expect(serverSrc).toMatch(/RETURNS:[\s\S]{0,2000}rolling time window/i);
+    // Prompt-diet pass: RETURNS: section dropped from the description (moved
+    // to skills/context-mode/SKILL.md); the throttle note stays inline.
+    expect(serverSrc).toMatch(/Throttled:[\s\S]{0,200}rolling window/i);
     expect(serverSrc).toMatch(/CONTEXT_MODE_SEARCH_WINDOW_MS/);
   });
 });
