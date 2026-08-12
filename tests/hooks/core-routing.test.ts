@@ -539,6 +539,11 @@ describe("routePreToolUse", () => {
 
   describe("Subagent ctx_commands omission (#233)", () => {
     it("Agent subagent prompt omits ctx_commands", () => {
+      // Prompt-diet pass (maint/prompt-diet): subagent injection is now a
+      // one-line pointer (createSubagentPointer), not the full XML block —
+      // cheaper per-spawn. It never carries a ctx_commands section (those
+      // MCP-tool convenience commands were never reachable from a subagent
+      // anyway) and still names the primary routing tool.
       const result = routePreToolUse("Agent", {
         prompt: "Search the codebase",
         subagent_type: "general-purpose",
@@ -547,10 +552,10 @@ describe("routePreToolUse", () => {
       expect(result!.action).toBe("modify");
       const prompt = (result!.updatedInput as Record<string, string>).prompt;
       expect(prompt).not.toContain("<ctx_commands>");
-      expect(prompt).toContain("<tool_selection_hierarchy>");
+      expect(prompt).toContain("ctx_batch_execute");
     });
 
-    it("injects Claude Code Agent routing and ToolSearch bootstrap by default", () => {
+    it("injects Claude Code Agent routing pointer and ToolSearch bootstrap by default", () => {
       const result = routePreToolUse("Agent", {
         prompt: "Research this repository",
         subagent_type: "general-purpose",
@@ -558,9 +563,24 @@ describe("routePreToolUse", () => {
       expect(result).not.toBeNull();
       expect(result!.action).toBe("modify");
       const prompt = (result!.updatedInput as Record<string, string>).prompt;
-      expect(prompt).toContain("<context_window_protection>");
+      expect(prompt).toContain("[context-mode, installed plugin config]");
       expect(prompt).toContain("ToolSearch");
       expect(prompt).not.toContain("<ctx_commands>");
+    });
+
+    it("CONTEXT_MODE_SUBAGENT_ROUTING=0 skips Agent prompt injection entirely (#967)", () => {
+      const prev = process.env.CONTEXT_MODE_SUBAGENT_ROUTING;
+      process.env.CONTEXT_MODE_SUBAGENT_ROUTING = "0";
+      try {
+        const result = routePreToolUse("Agent", {
+          prompt: "Research this repository",
+          subagent_type: "general-purpose",
+        });
+        expect(result).toBeNull();
+      } finally {
+        if (prev === undefined) delete process.env.CONTEXT_MODE_SUBAGENT_ROUTING;
+        else process.env.CONTEXT_MODE_SUBAGENT_ROUTING = prev;
+      }
     });
 
     it("ROUTING_BLOCK constant includes ctx_commands for main session", () => {

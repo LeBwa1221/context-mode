@@ -4,17 +4,17 @@ import {
   resetGuidanceThrottle,
   isStructurallyBounded,
 } from "../../hooks/core/routing.mjs";
-import { createRoutingBlock } from "../../hooks/routing-block.mjs";
+import { createRoutingBlock, createSubagentPointer } from "../../hooks/routing-block.mjs";
 import { createToolNamer } from "../../hooks/core/tool-naming.mjs";
 
-// Subagent routing uses createRoutingBlock(t, { includeCommands: false }).
-// For claude-code (incl. the default when platform is unset) it also enables the
-// ToolSearch bootstrap so deferred ctx_* tools are loadable by the subagent (#724).
+// Prompt-diet pass (maint/prompt-diet): subagent routing now injects a
+// one-line pointer (createSubagentPointer) instead of the full session
+// block — cheaper per-spawn and less likely to be misread as prompt
+// injection by auto-mode permission classifiers (#967/#918). For
+// claude-code (incl. the default when platform is unset) it also carries
+// the ToolSearch bootstrap so deferred ctx_* tools are loadable (#724).
 const _t = createToolNamer("claude-code");
-const SUBAGENT_BLOCK = createRoutingBlock(_t, {
-  includeCommands: false,
-  toolSearchBootstrap: true,
-});
+const SUBAGENT_BLOCK = createSubagentPointer(_t, { toolSearchBootstrap: true });
 
 describe("Routing: Subagents (Agent only — Task removed per #241)", () => {
   it("Agent tool injects routing block into prompt field", () => {
@@ -63,18 +63,18 @@ describe("Routing: Subagents (Agent only — Task removed per #241)", () => {
     expect(decision.updatedInput.nested).toEqual({ a: 1 });
   });
 
-  it("Agent routing block contains label guidance for batch_execute (#256)", () => {
+  it("Agent routing block names batch_execute for gather-step routing (#256)", () => {
+    // Prompt-diet pass: the per-command label/FTS5-chunk-title guidance moved
+    // to skills/context-mode/SKILL.md — the subagent pointer only needs to
+    // name the tool so the subagent knows it exists.
     const decision = routePreToolUse("Agent", { prompt: "test" }, "/test");
     const prompt = decision.updatedInput.prompt;
-    expect(prompt).toContain("label");
-    expect(prompt).toContain("descriptive");
-    expect(prompt).toContain("FTS5 chunk title");
+    expect(prompt).toContain("ctx_batch_execute");
   });
 
   it("Agent block includes the ToolSearch bootstrap for deferred ctx_* tools on claude-code (#724)", () => {
     const decision = routePreToolUse("Agent", { prompt: "test" }, "/test", "claude-code");
     const prompt = decision.updatedInput.prompt;
-    expect(prompt).toContain("deferred_tool_bootstrap");
     expect(prompt).toContain("ToolSearch");
     expect(prompt).toContain("select:mcp__plugin_context-mode_context-mode__ctx_batch_execute");
   });
@@ -82,7 +82,6 @@ describe("Routing: Subagents (Agent only — Task removed per #241)", () => {
   it("Agent block omits the ToolSearch bootstrap on platforms without deferred tools (#724)", () => {
     const decision = routePreToolUse("Agent", { prompt: "test" }, "/test", "codex");
     const prompt = decision.updatedInput.prompt;
-    expect(prompt).not.toContain("deferred_tool_bootstrap");
     expect(prompt).not.toContain("ToolSearch");
   });
 

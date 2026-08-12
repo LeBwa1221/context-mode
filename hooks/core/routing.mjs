@@ -13,7 +13,7 @@
 import {
   ROUTING_BLOCK, READ_GUIDANCE, GREP_GUIDANCE, BASH_GUIDANCE, EXTERNAL_MCP_GUIDANCE,
   createRoutingBlock, createReadGuidance, createGrepGuidance, createBashGuidance,
-  createExternalMcpGuidance,
+  createExternalMcpGuidance, createSubagentPointer,
 } from "../routing-block.mjs";
 import { createToolNamer } from "./tool-naming.mjs";
 import { isMCPReady } from "./mcp-ready.mjs";
@@ -890,8 +890,17 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
   }
 
   // ─── Agent: inject context-mode routing into subagent prompts ───
-  // Subagents cannot use ctx commands (stats/doctor/upgrade/purge) — omit that section (#233)
+  // A subagent gets the cheapest form that still routes correctly — a
+  // one-line pointer, not the full session block — since (a) it's paid on
+  // every spawn and (b) a large injected block is what auto-mode permission
+  // classifiers sometimes flag as prompt injection and deny the spawn over
+  // (#967/#918). Opt out entirely with CONTEXT_MODE_SUBAGENT_ROUTING=0 (also
+  // skips the Bash->general-purpose upgrade below, which exists only so the
+  // subagent can reach the now-omitted ctx_* tools).
   if (canonical === "Agent") {
+    if (["0", "false", "off", "no"].includes(String(process.env.CONTEXT_MODE_SUBAGENT_ROUTING).trim().toLowerCase())) {
+      return null;
+    }
     const subagentType = toolInput.subagent_type ?? "";
     // Detect the correct field name for the prompt/request/objective/question/query
     const fieldName = ["prompt", "request", "objective", "question", "query", "task"].find(f => f in toolInput) ?? "prompt";
@@ -902,10 +911,7 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
     // invoke and stalls (see #724). Prepend the ToolSearch bootstrap for claude-code
     // (the default when platform is unset). Other platforms don't defer, so skip it.
     const isClaudeCode = !platform || platform === "claude-code";
-    const subagentBlock = createRoutingBlock(t, {
-      includeCommands: false,
-      toolSearchBootstrap: isClaudeCode,
-    });
+    const subagentBlock = createSubagentPointer(t, { toolSearchBootstrap: isClaudeCode });
 
     const updatedInput =
       subagentType === "Bash"

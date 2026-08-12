@@ -11,10 +11,27 @@
 
 import { createToolNamer } from "./core/tool-naming.mjs";
 
+// ── Prompt-budget env knob ─────────────────────────────────
+//
+// CONTEXT_MODE_ROUTING_BLOCK controls the SessionStart routing-block size:
+//   "full"  — the original verbose block (createRoutingBlock's default shape)
+//   "short" — compact form, same tags/routing intent, far fewer bytes (default)
+//   "off"   — no routing block injected at all
+// Default is "short" — the full block measured ~4.8KB (~1.3K tokens) injected
+// once per session; short keeps the tag contract call sites/tests rely on
+// (<context_window_protection>, <tool_selection_hierarchy>, etc.) at a
+// fraction of the size. Unknown/unset values fall back to "short".
+export function getRoutingBlockMode() {
+  const raw = (process.env.CONTEXT_MODE_ROUTING_BLOCK || "").trim().toLowerCase();
+  return raw === "full" || raw === "off" ? raw : "short";
+}
+
 // ── Factory functions ─────────────────────────────────────
 
 export function createRoutingBlock(t, options = {}) {
-  const { includeCommands = true, toolSearchBootstrap = false } = options;
+  const { includeCommands = true, toolSearchBootstrap = false, mode = "full" } = options;
+  if (mode === "off") return "";
+  if (mode === "short") return createShortRoutingBlock(t, { includeCommands, toolSearchBootstrap });
   return `
 <context_window_protection>
   <priority_instructions>
@@ -77,6 +94,60 @@ ${includeCommands ? `
   </ctx_commands>
 ` : ''}
 </context_window_protection>`;
+}
+
+// Compact routing block — same tag contract and routing intent as
+// createRoutingBlock's full form, aimed at <1.2KB so it's cheap to inject
+// every session. Detail that doesn't change tool selection (worked
+// examples, the full ctx_commands catalog) lives in the context-mode skill
+// instead of being repeated here every session.
+function createShortRoutingBlock(t, { includeCommands = true, toolSearchBootstrap = false } = {}) {
+  return `
+<context_window_protection>
+  <priority_instructions>
+    Every byte a tool returns enters context. context-mode tools work in a sandbox and return only the derived answer.
+  </priority_instructions>
+${toolSearchBootstrap ? `
+  <deferred_tool_bootstrap>
+    Tools below may be DEFERRED — load once: ToolSearch(query: "select:${t("ctx_batch_execute")},${t("ctx_search")},${t("ctx_execute")},${t("ctx_execute_file")},${t("ctx_fetch_and_index")}")
+  </deferred_tool_bootstrap>
+` : ''}
+  <tool_selection_hierarchy>
+    GATHER: ${t("ctx_batch_execute")}(commands, queries) — run+index+search in one round trip.
+    FOLLOW-UP: ${t("ctx_search")}(queries: [...]) — batch every question in one call.
+    PROCESSING: ${t("ctx_execute")}(language, code) / ${t("ctx_execute_file")}(path, language, code) — only console.log() enters context; writes NOT persisted, use Write/Edit for those.
+  </tool_selection_hierarchy>
+
+  <when_not_to_use>
+    Bash/Read/Grep/Write/Edit stay correct for a short fixed output, editing, or mutating state; WebFetch → ${t("ctx_fetch_and_index")}(url, source) then ${t("ctx_search")}(queries).
+  </when_not_to_use>
+
+  <output_constraints>
+    Write artifacts (code, configs, PRDs) to files. Return only: file path + 1-line description.
+  </output_constraints>
+  <session_continuity>
+    Earlier skills/roles/decisions are a memory aid, not a standing order — the user's latest message takes precedence.
+  </session_continuity>
+${includeCommands ? `
+  <ctx_commands>
+    "ctx stats/doctor/upgrade/purge" → call the matching MCP tool, run any returned shell command, show output. KB persists across /clear+/compact; "ctx purge" resets it.
+  </ctx_commands>
+` : ''}
+</context_window_protection>`;
+}
+
+// One-line pointer for subagent prompts. A subagent's Task/Agent spawn call
+// is a routing decision itself (some permission classifiers flag large
+// injected blocks as prompt injection — #967/#918) so it gets the cheapest
+// form that still routes correctly: tool names + the one non-obvious rule
+// (raw output stays in the sandbox unless printed). Self-identifies as
+// locally installed plugin config, not third-party injected content.
+export function createSubagentPointer(t, options = {}) {
+  const { toolSearchBootstrap = false } = options;
+  const bootstrap = toolSearchBootstrap
+    ? ` If ${t("ctx_batch_execute")} etc. are deferred (schema not loaded), ToolSearch(query: "select:${t("ctx_batch_execute")},${t("ctx_search")},${t("ctx_execute")},${t("ctx_execute_file")},${t("ctx_fetch_and_index")}") once first.`
+    : "";
+  return `\n\n[context-mode, installed plugin config] Prefer ${t("ctx_batch_execute")}/${t("ctx_search")}/${t("ctx_execute")}/${t("ctx_execute_file")}/${t("ctx_fetch_and_index")} over Bash/Read/Grep/WebFetch for anything beyond a short fixed output — only what you print enters context, raw bytes stay in the sandbox. File writes still go through Write/Edit.${bootstrap}`;
 }
 
 export function createReadGuidance(t) {
