@@ -46,7 +46,7 @@ await runHook(async () => {
 
   const detectedPlatform = detectPlatformFromEnv();
   const toolNamer = createToolNamer(detectedPlatform);
-  // #967/#1031: CONTEXT_MODE_ROUTING_BLOCK=off|short|full, default "short" —
+  // #967/#1031: CONTEXT_MODE_ROUTING_BLOCK=off|short|full, default "short" -
   // see hooks/routing-block.mjs. Paid once per session, so the default is
   // the compact form; set to "full" to restore the original verbose block.
   const ROUTING_BLOCK = createRoutingBlock(toolNamer, { mode: getRoutingBlockMode() });

@@ -890,8 +890,8 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
   }
 
   // ─── Agent: inject context-mode routing into subagent prompts ───
-  // A subagent gets the cheapest form that still routes correctly — a
-  // one-line pointer, not the full session block — since (a) it's paid on
+  // A subagent gets the cheapest form that still routes correctly - a
+  // one-line pointer, not the full session block - since (a) it's paid on
   // every spawn and (b) a large injected block is what auto-mode permission
   // classifiers sometimes flag as prompt injection and deny the spawn over
   // (#967/#918). Opt out entirely with CONTEXT_MODE_SUBAGENT_ROUTING=0 (also

@@ -1659,11 +1659,11 @@ server.registerTool(
     },
     description: `Run code in a sandboxed subprocess.${bunNote} Languages: ${langList}.
 
-Only console.log() output enters your conversation. Use instead of Bash to derive an answer FROM data (filter, count, aggregate). Does NOT persist file writes — use Write/Edit for that.
+Only console.log() output enters your conversation. Use instead of Bash to derive an answer FROM data (filter, count, aggregate). Does NOT persist file writes - use Write/Edit for that.
 
-WHEN NOT: a single short command you'll read verbatim (whoami, pwd, git status) — Bash is simpler.
+WHEN NOT: a single short command you'll read verbatim (whoami, pwd, git status) - Bash is simpler.
 
-background: true keeps a long-running process alive past the timeout. intent: search string — output over ~5KB is auto-indexed, follow up with ctx_search.`,
+background: true keeps a long-running process alive past the timeout. intent: search string - output over ~5KB is auto-indexed, follow up with ctx_search.`,
     inputSchema: z.object({
       language: z
         .enum([
@@ -1708,7 +1708,7 @@ background: true keeps a long-running process alive past the timeout. intent: se
         .string()
         .optional()
         .describe(
-          "What you're looking for. When output exceeds ~5KB, returns indexed section titles/previews instead of full content — retrieve via ctx_search(queries: [...]).",
+          "What you're looking for. When output exceeds ~5KB, returns indexed section titles/previews instead of full content - retrieve via ctx_search(queries: [...]).",
         ),
     }),
   },
@@ -2025,11 +2025,11 @@ server.registerTool(
       idempotentHint: false,
       openWorldHint: true,
     },
-    description: `Read a file into a sandboxed FILE_CONTENT variable and run code over it. Only what you console.log() enters your conversation. Same principle as ctx_execute, scoped to one named file — use to know something ABOUT a large/structured file without SEEing all of it.
+    description: `Read a file into a sandboxed FILE_CONTENT variable and run code over it. Only what you console.log() enters your conversation. Same principle as ctx_execute, scoped to one named file - use to know something ABOUT a large/structured file without SEEing all of it.
 
-WHEN NOT: you intend to EDIT the file — use Read so Edit can match exact text. Also use Read for a small file or a known offset/line.
+WHEN NOT: you intend to EDIT the file - use Read so Edit can match exact text. Also use Read for a small file or a known offset/line.
 
-intent: search string — output over ~5KB is auto-indexed; follow up with ctx_search.`,
+intent: search string - output over ~5KB is auto-indexed; follow up with ctx_search.`,
     inputSchema: z.object({
       path: z
         .string()
@@ -2203,7 +2203,7 @@ server.registerTool(
     },
     description: `Store content in a searchable knowledge base (BM25 over FTS5). Retrieve any section later via ctx_search(source: "<label>"); nothing is summarized or truncated.
 
-Use for docs, API references, README/changelog content you'll query precisely later. NOT for log/test/CSV/build output — use ctx_execute_file instead (processes in-sandbox, no persistence).
+Use for docs, API references, README/changelog content you'll query precisely later. NOT for log/test/CSV/build output - use ctx_execute_file instead (processes in-sandbox, no persistence).
 
 \`path\` reads server-side (content never enters context) and stores a hash so ctx_search flags staleness later.`,
     inputSchema: z.object({
@@ -2242,7 +2242,7 @@ Use for docs, API references, README/changelog content you'll query precisely la
         "Directory-only: apply nearest .gitignore (default: true).",
       ),
       followSymlinks: z.boolean().optional().describe(
-        "Directory-only: follow symlinks (default: false — cycle/escape risk).",
+        "Directory-only: follow symlinks (default: false - cycle/escape risk).",
       ),
     }),
   },
@@ -2505,9 +2505,9 @@ server.registerTool(
 
 Batch every related question via \`queries\`. Scope with \`source\` (partial match ok). \`sort: "timeline"\` gives a chronological view instead of relevance ranking.
 
-WHEN NOT: nothing indexed and no session memory yet — capture first, then search.
+WHEN NOT: nothing indexed and no session memory yet - capture first, then search.
 
-Throttled: taper/block after repeated calls in a rolling window — batch instead of calling repeatedly.`,
+Throttled: taper/block after repeated calls in a rolling window - batch instead of calling repeatedly.`,
     // Schema construction is centralised in `src/search/ctx-search-schema.ts`
     // so the conditional `project` field (only registered when the host runs
     // in shared-DB mode, `CONTEXT_MODE_PROJECT_DIR` set at module load) is a
@@ -3345,7 +3345,7 @@ server.registerTool(
       idempotentHint: false,
       openWorldHint: true,
     },
-    description: `Fetches URL content (HTML->markdown, JSON chunked, plain text as-is), persists it in a searchable knowledge base, returns a small preview per source. Raw page bytes never enter your conversation — retrieve any section later via ctx_search(source: "<label>").
+    description: `Fetches URL content (HTML->markdown, JSON chunked, plain text as-is), persists it in a searchable knowledge base, returns a small preview per source. Raw page bytes never enter your conversation - retrieve any section later via ctx_search(source: "<label>").
 
 Cached on disk, default TTL 24h; \`ttl: 0\` or \`force: true\` bypasses cache. Multi-URL: pass \`requests: [{url, source?}, ...]\` with \`concurrency\` 2-8 (fetch phase only; indexing is always serial).
 
@@ -3590,11 +3590,11 @@ server.registerTool(
       idempotentHint: false,
       openWorldHint: true,
     },
-    description: `Run multiple commands in ONE call. Every output is auto-indexed; pass \`queries\` and matching sections come back in the same round trip — no follow-up ctx_search needed. Raw output is NOT echoed in full, only matched windows.
+    description: `Run multiple commands in ONE call. Every output is auto-indexed; pass \`queries\` and matching sections come back in the same round trip - no follow-up ctx_search needed. Raw output is NOT echoed in full, only matched windows.
 
 Use for 3+ related commands you'd otherwise run sequentially. \`concurrency\` 2-8 parallelizes I/O-bound commands (network, gh CLI); keep at 1 for CPU-bound or stateful ones (npm test/build, port-binding servers).
 
-WHEN NOT: a single command with no follow-up query — use ctx_execute directly.`,
+WHEN NOT: a single command with no follow-up query - use ctx_execute directly.`,
     inputSchema: z.object({
       commands: z.preprocess(coerceCommandsArray, z
         .array(
@@ -3617,7 +3617,7 @@ WHEN NOT: a single command with no follow-up query — use ctx_execute directly.
         .array(z.string())
         .min(1)
         .describe(
-          "Search queries to extract from indexed output. Batch every question here (5-8 queries) — no follow-up call needed.",
+          "Search queries to extract from indexed output. Batch every question here (5-8 queries) - no follow-up call needed.",
         )),
       timeout: z
         .coerce.number()
@@ -4327,7 +4327,7 @@ server.registerTool(
     },
     description: `DESTRUCTIVE: permanently delete indexed content. Cannot be undone. Requires confirm:true and exactly one scope.
 
-Only call when the user explicitly names a scope. If they say 'reset'/'clear'/'wipe' without one, ask which first. For freeing memory/performance, recommend ctx_stats instead — do not purge.
+Only call when the user explicitly names a scope. If they say 'reset'/'clear'/'wipe' without one, ask which first. For freeing memory/performance, recommend ctx_stats instead - do not purge.
 
 sessionId: "<uuid>" deletes just that session. scope: "project" wipes everything (preview with ctx_stats first).`,
     // NOTE: schema MUST be a plain z.object — no .refine()/.transform()/

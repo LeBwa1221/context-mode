@@ -540,7 +540,7 @@ describe("routePreToolUse", () => {
   describe("Subagent ctx_commands omission (#233)", () => {
     it("Agent subagent prompt omits ctx_commands", () => {
       // Prompt-diet pass (maint/prompt-diet): subagent injection is now a
-      // one-line pointer (createSubagentPointer), not the full XML block —
+      // one-line pointer (createSubagentPointer), not the full XML block -
       // cheaper per-spawn. It never carries a ctx_commands section (those
       // MCP-tool convenience commands were never reachable from a subagent
       // anyway) and still names the primary routing tool.

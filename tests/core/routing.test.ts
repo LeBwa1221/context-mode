@@ -9,7 +9,7 @@ import { createToolNamer } from "../../hooks/core/tool-naming.mjs";
 
 // Prompt-diet pass (maint/prompt-diet): subagent routing now injects a
 // one-line pointer (createSubagentPointer) instead of the full session
-// block — cheaper per-spawn and less likely to be misread as prompt
+// block - cheaper per-spawn and less likely to be misread as prompt
 // injection by auto-mode permission classifiers (#967/#918). For
 // claude-code (incl. the default when platform is unset) it also carries
 // the ToolSearch bootstrap so deferred ctx_* tools are loadable (#724).
@@ -65,7 +65,7 @@ describe("Routing: Subagents (Agent only — Task removed per #241)", () => {
 
   it("Agent routing block names batch_execute for gather-step routing (#256)", () => {
     // Prompt-diet pass: the per-command label/FTS5-chunk-title guidance moved
-    // to skills/context-mode/SKILL.md — the subagent pointer only needs to
+    // to skills/context-mode/SKILL.md - the subagent pointer only needs to
     // name the tool so the subagent knows it exists.
     const decision = routePreToolUse("Agent", { prompt: "test" }, "/test");
     const prompt = decision.updatedInput.prompt;

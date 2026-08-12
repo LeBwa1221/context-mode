@@ -5337,7 +5337,7 @@ describe("tool description style contract (#683 ADR-0002)", () => {
   // tool-selection quality, but RETURNS/EXAMPLE duplicated content that
   // already lives in skills/context-mode/SKILL.md (loaded on demand, not
   // on every request) and cost real per-call budget. These seven tools
-  // still open with a WHEN NOT: disambiguation section (kept — it's the
+  // still open with a WHEN NOT: disambiguation section (kept - it's the
   // sibling-tool selection cue that matters for routing), just without
   // the RETURNS:/EXAMPLE: sections. Worked examples moved to the skill.
   const EXEMPT_FROM_WHEN = new Set([

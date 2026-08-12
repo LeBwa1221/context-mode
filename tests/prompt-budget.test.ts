@@ -18,14 +18,14 @@ import { createToolNamer } from "../hooks/core/tool-naming.mjs";
  *
  * This guard boots the built server, calls tools/list over stdio exactly
  * like a real MCP client would, and sums JSON.stringify(tool).length across
- * every tool — the same measurement approach used to size the diet. It
+ * every tool - the same measurement approach used to size the diet. It
  * fails if descriptions get re-inflated past the budget.
  */
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SERVER_BUNDLE = resolve(ROOT, "server.bundle.mjs");
 
-// Pre-diet baseline was 29,959 bytes. The diet landed at 14,959 — comfortably
+// Pre-diet baseline was 29,959 bytes. The diet landed at 14,959 - comfortably
 // under half. The threshold leaves headroom for legitimate future growth
 // (a new field, a clarifying sentence) without permitting the regression
 // back toward the old total.
@@ -58,7 +58,7 @@ function listTools(): Promise<Array<{ name: string; description?: string }>> {
             return;
           }
         } catch {
-          // partial line — keep buffering
+          // partial line - keep buffering
         }
       }
     });
