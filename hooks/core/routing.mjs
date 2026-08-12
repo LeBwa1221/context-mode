@@ -904,12 +904,25 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
   if (canonical === "WebFetch") {
     if (!process.env[WEBFETCH_NUDGE_SUPPRESS_ENV]) {
       const url = getWebFetchUrl(toolInput);
-      const webFetchGuidance = `context-mode: consider ${t("ctx_fetch_and_index")}(url: "${url}", source: "...") to fetch + index the page, then ${t("ctx_search")}(queries: [...]) to query the indexed content — the raw page bytes stay in storage instead of entering your conversation. Or ${t("ctx_execute")}(language, code) to derive your answer in one round trip without persisting the response. WebFetch still works directly when the sandbox tools aren't available to you.`;
+      const webFetchGuidance = `context-mode: Call ${t("ctx_fetch_and_index")}(url: "${url}", source: "...") to fetch + index the page, then ${t("ctx_search")}(queries: [...]) to query the indexed content — the raw page bytes stay in storage instead of entering your conversation. Or call ${t("ctx_execute")}(language, code) to derive your answer in one round trip without persisting the response. WebFetch still works directly when the sandbox tools aren't available to you.`;
       const decision = mcpRedirect(
         guidancePeriodic("webfetch", webFetchGuidance, sessionId, getWebFetchNudgeEvery()),
         mcpToolsAvailable,
       );
-      if (decision) return decision;
+      if (decision) {
+        // D2 PRD Phase 4.1: marker payload for PostToolUse byte accounting.
+        // Piggybacks on the nudge firing — only counted on calls where the
+        // advisory is actually shown, same cadence as the nudge itself.
+        decision.redirectMeta = {
+          tool: "WebFetch",
+          type: "webfetch-redirected",
+          // 16384 = typical web page body bytes prevented from entering the
+          // model's context window.
+          bytesAvoided: 16384,
+          commandSummary: String(url).slice(0, 200),
+        };
+        return decision;
+      }
     }
     return null;
   }
