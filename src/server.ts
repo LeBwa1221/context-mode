@@ -3603,32 +3603,11 @@ server.registerTool(
       idempotentHint: false,
       openWorldHint: true,
     },
-    description: `Run multiple commands in ONE call. Every command's output is auto-indexed into the knowledge base; if you also pass \`queries\`, the matching sections come back in the same round trip so a follow-up search call is not needed.
+    description: `Run multiple commands in ONE call. Every command's output is auto-indexed; if you also pass \`queries\`, matching sections come back in the same round trip — no follow-up ctx_search needed. Raw output is NOT echoed in full, only matched windows.
 
-Concurrency parallelizes the FETCH phase (run-the-commands). The DERIVATION phase — turning raw output into an answer — still belongs in code: add a processing command that consumes the indexed output and prints only the answer, so the raw bytes never enter your conversation (Think-in-Code, same principle as the sandbox tool).
+Use for 3+ related commands you'd otherwise run sequentially (multi-issue lookups, git log+diff+blame, multi-repo reads). Pass \`concurrency\` 2-8 to parallelize I/O-bound commands (network, gh CLI, cloud APIs); keep at 1 for CPU-bound or stateful commands (npm test/build, port-binding servers, lock-file holders) since concurrency>1 switches to per-command timeouts.
 
-WHEN:
-  - You have 3+ related commands you would otherwise run sequentially (multi-issue lookups, git log + git diff + git blame, multi-file reads, multi-region cloud queries)
-  - You want to gather AND query in one round trip — pass \`queries\` so the matching sections come back inline
-  - You want to parallelize I/O-bound work — pass \`concurrency\` 2-8 (network calls, gh CLI, cloud APIs, multi-repo git reads)
-  - The combined output is large enough that piping it through ctx_search later would itself be expensive — let auto-index + inline queries do both in one shot
-
-WHEN NOT:
-  - Single command with no follow-up query — run it in the sandbox tool directly
-  - CPU-bound or stateful commands — keep concurrency at 1 (npm test, build, lint, port-binding servers, lock-file holders, anything that races on the same resource)
-
-RETURNS:
-  Auto-indexed section list per command label, plus top matches per query (when \`queries\` is passed). Raw output is NOT echoed in full — only the matched windows. Concurrency>1 switches each command to its own per-command timeout (no shared budget); concurrency=1 preserves the legacy shared-budget cascading-skip-on-timeout path. Use 4-8 for I/O-bound batches; keep at 1 for CPU work or shared-state commands; lower the value when target hosts enforce per-IP rate limits.
-
-EXAMPLE: ctx_batch_execute(
-  commands: [
-    {label: "issue 1", command: "gh issue view 1"},
-    {label: "issue 2", command: "gh issue view 2"},
-    {label: "summarize", command: "echo done"}
-  ],
-  queries: ["root cause", "proposed fix"],
-  concurrency: 2
-)`,
+WHEN NOT: a single command with no follow-up query — use ctx_execute directly.`,
     inputSchema: z.object({
       commands: z.preprocess(coerceCommandsArray, z
         .array(
@@ -3652,9 +3631,7 @@ EXAMPLE: ctx_batch_execute(
         .array(z.string())
         .min(1)
         .describe(
-          "Search queries to extract information from indexed output. Use 5-8 comprehensive queries. " +
-          "Each returns top 5 matching sections with full content. " +
-          "This is your ONLY chance — put ALL your questions here. No follow-up calls needed.",
+          "Search queries to extract information from indexed output. Batch every question here (5-8 comprehensive queries) — no follow-up call needed. Each returns top 5 matching sections.",
         )),
       timeout: z
         .coerce.number()
@@ -3668,11 +3645,7 @@ EXAMPLE: ctx_batch_execute(
         .optional()
         .default(1)
         .describe(
-          "Max commands to run in parallel (1-8, default: 1). " +
-          "Use 4-8 for I/O-bound batches (network, gh, curl, multi-repo git reads). " +
-          "Keep at 1 for CPU-bound (npm test, build, lint) or stateful commands (ports, locks). " +
-          ">1 switches to per-command timeouts (no shared budget) and " +
-          "individual `(timed out)` blocks instead of cascading skip.",
+          "Max commands to run in parallel (1-8, default: 1). Use 4-8 for I/O-bound batches; keep at 1 for CPU-bound or stateful commands (ports, locks). >1 switches to per-command timeouts.",
         ),
       cwd: z
         .string()
