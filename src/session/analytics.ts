@@ -628,7 +628,11 @@ export function enumerateAdapterDirs(opts?: {
   claudeConfigDir?: string;
 }): AdapterDirEntry[] {
   const home = opts?.home ?? homedir();
-  const claudeConfigDir = opts?.claudeConfigDir ?? resolveClaudeConfigDir();
+  // Default relative to an explicitly supplied `home` so the function stays
+  // pure/testable; only fall back to the ambient env when the caller didn't
+  // override `home` either.
+  const claudeConfigDir = opts?.claudeConfigDir
+    ?? (opts?.home ? join(opts.home, ".claude") : resolveClaudeConfigDir());
   // Mirrors `getSessionDirSegments` in src/adapters/detect.ts:92-111.
   const map: ReadonlyArray<readonly [string, readonly string[]]> = [
     ["claude-code",      [".claude"]],
