@@ -172,6 +172,10 @@ describe("Slice 2.1 — enumerateAdapterDirs()", () => {
 // Slice 2.1b — enumerateAdapterDirs honors $CLAUDE_CONFIG_DIR (#865)
 // ─────────────────────────────────────────────────────────
 
+// Contract: $CLAUDE_CONFIG_DIR is consulted only when the caller does not
+// override `home` — a supplied `home` fully determines the result (#866
+// purity fix). Real callers (src/server.ts, bin/statusline.mjs) always omit
+// `home`, so the env var keeps working exactly as #865 intended.
 describe("Slice 2.1b — enumerateAdapterDirs CLAUDE_CONFIG_DIR (#865)", () => {
   test("claude-code entry honors claudeConfigDir override; other adapters stay under home", () => {
     const home = "/HOME";
@@ -201,10 +205,31 @@ describe("Slice 2.1b — enumerateAdapterDirs CLAUDE_CONFIG_DIR (#865)", () => {
     }
   });
 
+  test("claude-code reflects $CLAUDE_CONFIG_DIR at runtime when home is omitted (no opt override)", () => {
+    const saved = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = "/tmp/custom-claude-cfg";
+    try {
+      const dirs = enumerateAdapterDirs();
+      const byName = Object.fromEntries(dirs.map((d) => [d.name, d]));
+      // resolveClaudeConfigDir() applies resolve() to $CLAUDE_CONFIG_DIR, which on
+      // Windows prepends the current drive (e.g. D:\tmp\...). Mirror that here so the
+      // expectation matches on every platform (no-op on POSIX). (#866 Windows CI)
+      expect(byName["claude-code"].sessionsDir).toBe(
+        join(resolve("/tmp/custom-claude-cfg"), "context-mode", "sessions"),
+      );
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = saved;
+    }
+  });
+
   // A caller-supplied `home` makes enumerateAdapterDirs pure: it must fully
   // determine the result, not be silently overridden by the ambient
   // $CLAUDE_CONFIG_DIR env var. Real callers that want the env var honored
-  // omit `home` (see the test above) or pass an explicit claudeConfigDir.
+  // omit `home` (see the two tests above) or pass an explicit claudeConfigDir.
+  // Regression guard for the bug this replaced: a caller-supplied home that
+  // does NOT determine the result is exactly what let claude-code's content
+  // DB drop out of multi-adapter aggregation (real-bytes-stats.test.ts).
   test("claude-code stays under <home>/.claude when home is given, even if $CLAUDE_CONFIG_DIR is set (purity)", () => {
     const saved = process.env.CLAUDE_CONFIG_DIR;
     process.env.CLAUDE_CONFIG_DIR = "/tmp/custom-claude-cfg";
