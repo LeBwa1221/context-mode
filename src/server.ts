@@ -4310,11 +4310,18 @@ server.registerTool(
     }
 
     // Net-savings accounting (#3 of the net-savings rework) — appended to
-    // every ctx_stats response regardless of which branch above ran.
+    // every ctx_stats response regardless of which branch above ran, EXCEPT
+    // a session with zero ctx_* calls: upstream #950 documents both a
+    // savings-with-no-activity report and a >100% ratio as real bugs, and
+    // "gross 0, overhead > 0, net negative" would be a savings figure for a
+    // session that never used context-mode at all.
     // Best-effort: a failure here must never block the rest of ctx_stats.
     try {
-      const net = await computeNetSavings();
-      text += "\n" + renderNetSavings(net).join("\n");
+      const totalCallsThisSession = Object.values(sessionStats.calls).reduce((a, b) => a + b, 0);
+      if (totalCallsThisSession > 0) {
+        const net = await computeNetSavings();
+        text += "\n" + renderNetSavings(net).join("\n");
+      }
     } catch { /* never block ctx_stats */ }
 
     return trackResponse("ctx_stats", {
