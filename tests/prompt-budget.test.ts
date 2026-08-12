@@ -25,17 +25,26 @@ import { createToolNamer } from "../hooks/core/tool-naming.mjs";
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SERVER_BUNDLE = resolve(ROOT, "server.bundle.mjs");
 
-// Pre-diet baseline was 29,959 bytes; the diet landed at 14,539 (-51.5%).
+// Pre-diet baseline was 29,959 bytes measured with a bare per-project DB
+// (CONTEXT_MODE_PROJECT_DIR unset). In shared-DB mode (CONTEXT_MODE_PROJECT_DIR
+// set) ctx_search's schema grows a "project" field, which is a legitimate
+// deployment mode, not an accident - so this guard measures THAT mode: it is
+// the worst case for schema size and any budget that holds for it holds for
+// the default mode too. Worst case landed at 14,715 (-50.9%).
+//
 // The threshold is pinned to the 50%-reduction line itself (half of 29,959,
 // rounded down), not an arbitrary round number - a schema total under this
-// line is by definition at least a 50% cut. That leaves ~440 bytes of
-// deliberate headroom above the current total for a genuine future field or
-// clarifying sentence, without permitting drift back toward the old total.
+// line is by definition at least a 50% cut. That leaves ~264 bytes of
+// deliberate headroom above the current worst-case total for a genuine
+// future field or clarifying sentence, without permitting drift back toward
+// the old total. Tool descriptions also embed live runtime detection
+// (available language interpreters, Bun presence) which varies a few dozen
+// bytes across machines; this headroom absorbs that too.
 const TOOL_SCHEMA_BUDGET = 14_979;
 
-function listTools(): Promise<Array<{ name: string; description?: string }>> {
+function listTools(env: NodeJS.ProcessEnv = {}): Promise<Array<{ name: string; description?: string }>> {
   return new Promise((resolvePromise, reject) => {
-    const proc = spawn("node", [SERVER_BUNDLE], { stdio: ["pipe", "pipe", "pipe"] });
+    const proc = spawn("node", [SERVER_BUNDLE], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...env } });
     let out = "";
     let settled = false;
     const timer = setTimeout(() => {
@@ -81,11 +90,20 @@ function listTools(): Promise<Array<{ name: string; description?: string }>> {
 }
 
 describe("MCP tool schema prompt budget (maint/prompt-diet)", () => {
-  it(`total tools/list payload stays under ${TOOL_SCHEMA_BUDGET} bytes`, async () => {
-    const tools = await listTools();
+  it(`total tools/list payload stays under ${TOOL_SCHEMA_BUDGET} bytes in shared-DB mode (worst case)`, async () => {
+    const tools = await listTools({ CONTEXT_MODE_PROJECT_DIR: ROOT });
     expect(tools.length).toBeGreaterThanOrEqual(11);
     const total = tools.reduce((sum, t) => sum + JSON.stringify(t).length, 0);
     expect(total).toBeLessThan(TOOL_SCHEMA_BUDGET);
+  }, 20_000);
+
+  it("default per-project mode is smaller than shared-DB mode", async () => {
+    const [defaultMode, sharedMode] = await Promise.all([
+      listTools(),
+      listTools({ CONTEXT_MODE_PROJECT_DIR: ROOT }),
+    ]);
+    const sum = (tools: Array<{ name: string }>) => tools.reduce((s, t) => s + JSON.stringify(t).length, 0);
+    expect(sum(defaultMode)).toBeLessThanOrEqual(sum(sharedMode));
   }, 20_000);
 });
 
