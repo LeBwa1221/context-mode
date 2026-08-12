@@ -29,6 +29,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, test } from "vitest";
 import { SessionDB } from "../../src/session/db.js";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 import {
   enumerateAdapterDirs,
   getMultiAdapterLifetimeStats,
@@ -98,15 +99,19 @@ function seed(
 // ─────────────────────────────────────────────────────────
 
 describe("Slice 2.1 — enumerateAdapterDirs()", () => {
-  test("returns one entry for each of the 17 known adapters", () => {
+  // maint/global-store: 17 legacy per-profile entries collapse where they
+  // resolve to the identical path (gemini-cli/antigravity/antigravity-cli
+  // all shared ~/.gemini/context-mode even before the global-store change —
+  // a pre-existing bug this dedup also fixes), plus ONE new "context-mode"
+  // entry for the current global root. 17 - 2 merged + 1 new = 16.
+  test("returns one entry per DISTINCT resolved path (legacy dedup + one new global-root entry)", () => {
     const dirs = enumerateAdapterDirs({ home: "/HOME" });
     const names = dirs.map((d) => d.name).sort();
     expect(names).toEqual(
       [
-        "antigravity",
-        "antigravity-cli",
         "claude-code",
         "codex",
+        "context-mode",
         "copilot-cli",
         "cursor",
         "gemini-cli",
@@ -122,6 +127,27 @@ describe("Slice 2.1 — enumerateAdapterDirs()", () => {
         "zed",
       ].sort(),
     );
+    expect(dirs.length).toBe(16);
+  });
+
+  test("gemini-cli, antigravity, and antigravity-cli merge into ONE entry (they share ~/.gemini/context-mode)", () => {
+    const dirs = enumerateAdapterDirs({ home: "/HOME" });
+    const gemini = dirs.find((d) => d.sessionsDir === join("/HOME", ".gemini", "context-mode", "sessions"));
+    expect(gemini).toBeDefined();
+    expect(gemini!.names.sort()).toEqual(["antigravity", "antigravity-cli", "gemini-cli"]);
+  });
+
+  test("the new global-root entry is distinct from every legacy entry and reflects resolveContextModeDataRoot", () => {
+    const home = "/HOME";
+    const dirs = enumerateAdapterDirs({ home });
+    const globalEntry = dirs.find((d) => d.name === "context-mode")!;
+    expect(globalEntry).toBeDefined();
+    expect(globalEntry.sessionsDir).toBe(
+      join(resolveContextModeDataRoot(process.env, home), "context-mode", "sessions"),
+    );
+    // No legacy per-profile entry happens to collide with it.
+    const legacyPaths = dirs.filter((d) => d.name !== "context-mode").map((d) => d.sessionsDir);
+    expect(legacyPaths).not.toContain(globalEntry.sessionsDir);
   });
 
   test("each entry exposes sessionsDir and contentDir under <home>/<segments>/context-mode/", () => {
@@ -156,13 +182,16 @@ describe("Slice 2.1 — enumerateAdapterDirs()", () => {
     expect(byName["claude-code"].sessionsDir).toBe(join(home, ".claude", "context-mode", "sessions"));
     expect(byName["kilo"].sessionsDir).toBe(join(home, ".config", "kilo", "context-mode", "sessions"));
     expect(byName["pi"].sessionsDir).toBe(join(home, ".pi", "context-mode", "sessions"));
-    expect(byName["antigravity"].sessionsDir).toBe(join(home, ".gemini", "context-mode", "sessions"));
+    // antigravity merged into the gemini-cli entry (they share ~/.gemini/context-mode) —
+    // look it up by `names` instead of a dedicated top-level key.
+    const antigravity = dirs.find((d) => d.names.includes("antigravity"))!;
+    expect(antigravity.sessionsDir).toBe(join(home, ".gemini", "context-mode", "sessions"));
     expect(byName["jetbrains-copilot"].sessionsDir).toBe(join(home, ".config", "JetBrains", "context-mode", "sessions"));
   });
 
   test("defaults to os.homedir() when no override passed", () => {
     const dirs = enumerateAdapterDirs();
-    expect(dirs.length).toBe(17);
+    expect(dirs.length).toBe(16);
     const expectedSuffix = sep + join("context-mode", "sessions");
     expect(dirs.every((d) => d.sessionsDir.includes(expectedSuffix))).toBe(true);
   });
@@ -310,6 +339,91 @@ describe("Slice 2.2 — getMultiAdapterLifetimeStats()", () => {
     expect(r.totalEvents).toBe(0);
     expect(r.totalSessions).toBe(0);
     expect(r.perAdapter).toEqual([]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────
+// maint/global-store — dedup regression guards
+//
+// The two bugs measured on real disk before this fix:
+//   1. gemini-cli/antigravity/antigravity-cli shared ~/.gemini/context-mode
+//      and were triple-counted in totalEvents (pre-existing, independent of
+//      the global-root change).
+//   2. After the global-root change, adapters' REAL getSessionDir() drifted
+//      from enumerateAdapterDirs' hardcoded legacy map, so ctx_stats went
+//      blind on all new data.
+// ─────────────────────────────────────────────────────────
+
+describe("maint/global-store — no double-count when adapters share a dir", () => {
+  test("events in a directory shared by 3 legacy adapter names are counted ONCE, not 3x", () => {
+    const home = tmpHome();
+    // gemini-cli, antigravity, and antigravity-cli all resolve to this one
+    // physical directory (see enumerateAdapterDirs' dedup note).
+    const sharedSessions = ensureDir(join(home, ".gemini", "context-mode", "sessions"));
+    seed(dbPathFor(sharedSessions, "cccccccccccccccc"), `shared-${randomUUID()}`, [
+      { type: "tool_use", category: "file", data: "src/a.ts", projectDir: "/p/shared" },
+      { type: "tool_use", category: "file", data: "src/b.ts", projectDir: "/p/shared" },
+    ]);
+
+    const r = getMultiAdapterLifetimeStats({ home, claudeConfigDir: join(home, ".claude") });
+
+    // Exactly one perAdapter row for the shared directory, not three.
+    const rows = r.perAdapter.filter((a) => a.names.includes("antigravity"));
+    expect(rows.length).toBe(1);
+    expect(rows[0].names.sort()).toEqual(["antigravity", "antigravity-cli", "gemini-cli"]);
+    expect(rows[0].eventCount).toBe(2); // NOT 6 (2 events x 3 adapter names)
+    expect(r.totalEvents).toBe(2);
+  });
+
+  test("getMultiAdapterRealBytesStats also counts a shared directory's bytes once", () => {
+    const home = tmpHome();
+    const sharedSessions = ensureDir(join(home, ".gemini", "context-mode", "sessions"));
+    seed(dbPathFor(sharedSessions, "dddddddddddddddd"), `shared-${randomUUID()}`, [
+      { type: "x", category: "sandbox", data: "p", bytesAvoided: 5_000 },
+    ]);
+
+    const r = getMultiAdapterRealBytesStats({ home, claudeConfigDir: join(home, ".claude") });
+
+    expect(r.bytesAvoided).toBe(5_000); // NOT 15_000 (3x)
+    const rows = r.perAdapter.filter((a) => a.names.includes("antigravity"));
+    expect(rows.length).toBe(1);
+  });
+});
+
+describe("maint/global-store — enumeration matches real adapter defaults (drift guard)", () => {
+  test("the context-mode entry matches ClaudeCodeAdapter's real getSessionDir() (no explicit override set)", async () => {
+    const { ClaudeCodeAdapter } = await import("../../src/adapters/claude-code/index.js");
+    const savedHome = process.env.CONTEXT_MODE_HOME;
+    const savedDataDir = process.env.CONTEXT_MODE_DATA_DIR;
+    delete process.env.CONTEXT_MODE_HOME;
+    delete process.env.CONTEXT_MODE_DATA_DIR;
+    try {
+      const adapter = new ClaudeCodeAdapter();
+      const real = adapter.getSessionDir();
+      const dirs = enumerateAdapterDirs(); // home omitted — same ambient homedir() as the real adapter
+      const globalEntry = dirs.find((d) => d.name === "context-mode")!;
+      expect(globalEntry.sessionsDir).toBe(real);
+    } finally {
+      if (savedHome === undefined) delete process.env.CONTEXT_MODE_HOME; else process.env.CONTEXT_MODE_HOME = savedHome;
+      if (savedDataDir === undefined) delete process.env.CONTEXT_MODE_DATA_DIR; else process.env.CONTEXT_MODE_DATA_DIR = savedDataDir;
+    }
+  });
+
+  test("the context-mode entry moves with CONTEXT_MODE_HOME, tracking every default-inheriting adapter", async () => {
+    const { CursorAdapter } = await import("../../src/adapters/cursor/index.js");
+    const custom = tmpHome();
+    const saved = process.env.CONTEXT_MODE_HOME;
+    process.env.CONTEXT_MODE_HOME = custom;
+    try {
+      const adapter = new CursorAdapter();
+      const real = adapter.getSessionDir();
+      const dirs = enumerateAdapterDirs();
+      const globalEntry = dirs.find((d) => d.name === "context-mode")!;
+      expect(globalEntry.sessionsDir).toBe(real);
+      expect(globalEntry.sessionsDir).toBe(join(custom, "context-mode", "sessions"));
+    } finally {
+      if (saved === undefined) delete process.env.CONTEXT_MODE_HOME; else process.env.CONTEXT_MODE_HOME = saved;
+    }
   });
 });
 

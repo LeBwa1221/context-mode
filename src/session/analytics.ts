@@ -16,6 +16,7 @@ import { join, sep } from "node:path";
 import { loadDatabase as loadDatabaseImpl } from "../db-base.js";
 import { ensureSessionEventsSchema } from "./db.js";
 import { resolveClaudeConfigDir } from "../util/claude-config.js";
+import { resolveContextModeDataRoot } from "../adapters/base.js";
 
 function semverNewer(a: string, b: string): boolean {
   const pa = a.split(".").map(Number);
@@ -604,8 +605,10 @@ export class AnalyticsEngine {
  * detect.ts (which pulls in adapter loaders) into the stats path.
  */
 export interface AdapterDirEntry {
-  /** Adapter id matching `src/adapters/detect.ts` PlatformId. */
+  /** Primary adapter id — the first name (in map order) resolving to this path. Kept for backward compat with `adapterLabel()` lookups. */
   name: string;
+  /** Every adapter id that resolves to this SAME path (see dedup note below). Always includes `name`. */
+  names: string[];
   /** Absolute path to `<home>/<segments>/context-mode/sessions`. */
   sessionsDir: string;
   /** Absolute path to `<home>/<segments>/context-mode/content`. */
@@ -613,18 +616,45 @@ export interface AdapterDirEntry {
 }
 
 /**
- * Enumerate every known adapter's sessions + content dirs under `home`.
- * Used by `getMultiAdapterLifetimeStats` and `getMultiAdapterRealBytesStats`
- * so a single call surfaces "your work everywhere on this machine across
- * all AI tools" (the marketing line).
+ * Enumerate every known LEGACY (pre-global-store) per-profile sessions +
+ * content dir under `home`, plus ONE additional entry for the current
+ * global root. Used by `getMultiAdapterLifetimeStats` and
+ * `getMultiAdapterRealBytesStats` so a single call surfaces "your work
+ * everywhere on this machine across all AI tools" (the marketing line).
  *
- * Returns ALL 17 adapters even when the dir doesn't exist on disk — the
- * scanner functions filter to existing dirs. That keeps the enumeration
- * pure / testable without filesystem dependencies.
+ * maint/global-store: session/content storage now resolves to ONE shared
+ * global root by default (`resolveContextModeDataRoot`, src/adapters/base.ts)
+ * instead of each adapter's own profile-rooted dir. Two consequences here:
+ *
+ *   1. Several of the legacy per-profile entries below now resolve to the
+ *      SAME real directory as each other (e.g. gemini-cli / antigravity /
+ *      antigravity-cli all shared `~/.gemini/context-mode` even before the
+ *      global-store change — a pre-existing bug independent of it, caught
+ *      by measurement: aggregation used to triple-count that one
+ *      directory's events under three adapter names). Entries whose
+ *      resolved `sessionsDir` is identical are merged into ONE
+ *      `AdapterDirEntry` here, listing every adapter name that shares it in
+ *      `names`. Callers must not assume one entry == one real adapter.
+ *   2. The legacy map alone would make `ctx_stats` blind to every byte
+ *      written after the fix landed (nothing here points at the new global
+ *      root). A final `context-mode` entry is appended for it.
+ *
+ * ponytail: `adoptLargestLegacyDb()` (src/db-base.ts) COPIES a legacy DB
+ * into the new global root on first resolve — it never deletes the
+ * original. So a project touched since the fix landed shows up under BOTH
+ * its legacy adapter entry AND the new `context-mode` entry: a bounded
+ * double-count that only affects already-migrated projects, not new data.
+ * Upgrade path if this needs to be exact: track adopted-from paths and
+ * exclude them from the legacy entries, or retire legacy entries after a
+ * grace period once migration coverage is high.
+ *
+ * Returns every legacy adapter even when the dir doesn't exist on disk —
+ * the scanner functions filter to existing dirs. That keeps the
+ * enumeration pure / testable without filesystem dependencies.
  */
 export function enumerateAdapterDirs(opts?: {
   home?: string;
-  /** Config dir for claude-code; defaults to resolveClaudeConfigDir() so $CLAUDE_CONFIG_DIR is honored (#865). */
+  /** Config dir for claude-code's LEGACY entry; defaults to resolveClaudeConfigDir() so $CLAUDE_CONFIG_DIR is honored (#865). Does NOT affect the new global-root entry — CLAUDE_CONFIG_DIR governs settings.json only under the global store, never storage. */
   claudeConfigDir?: string;
 }): AdapterDirEntry[] {
   const home = opts?.home ?? homedir();
@@ -633,6 +663,8 @@ export function enumerateAdapterDirs(opts?: {
   // override `home` either.
   const claudeConfigDir = opts?.claudeConfigDir
     ?? (opts?.home ? join(opts.home, ".claude") : resolveClaudeConfigDir());
+  // Legacy per-profile segments, unchanged from before the global-store fix
+  // — still the correct place to look for historical, not-yet-migrated data.
   // Mirrors `getSessionDirSegments` in src/adapters/detect.ts:92-111.
   const map: ReadonlyArray<readonly [string, readonly string[]]> = [
     ["claude-code",      [".claude"]],
@@ -653,7 +685,7 @@ export function enumerateAdapterDirs(opts?: {
     ["zed",              [".config", "zed"]],
     ["jetbrains-copilot", [".config", "JetBrains"]],
   ];
-  return map.map(([name, segments]) => {
+  const legacy: AdapterDirEntry[] = map.map(([name, segments]) => {
     // claude-code honors $CLAUDE_CONFIG_DIR via resolveClaudeConfigDir (#865);
     // every other adapter stays rooted at $HOME.
     const base = name === "claude-code"
@@ -661,10 +693,35 @@ export function enumerateAdapterDirs(opts?: {
       : join(home, ...segments, "context-mode");
     return {
       name,
+      names: [name],
       sessionsDir: join(base, "sessions"),
       contentDir: join(base, "content"),
     };
   });
+
+  const globalBase = join(resolveContextModeDataRoot(process.env, opts?.home), "context-mode");
+  const globalEntry: AdapterDirEntry = {
+    name: "context-mode",
+    names: ["context-mode"],
+    sessionsDir: join(globalBase, "sessions"),
+    contentDir: join(globalBase, "content"),
+  };
+
+  return dedupeAdapterDirsByPath([...legacy, globalEntry]);
+}
+
+/** Merge entries whose `sessionsDir` resolves to the identical path — see enumerateAdapterDirs' doc comment. First-encountered name wins as the primary `name`. */
+function dedupeAdapterDirsByPath(entries: AdapterDirEntry[]): AdapterDirEntry[] {
+  const byPath = new Map<string, AdapterDirEntry>();
+  for (const entry of entries) {
+    const existing = byPath.get(entry.sessionsDir);
+    if (existing) {
+      existing.names.push(...entry.names);
+    } else {
+      byPath.set(entry.sessionsDir, { ...entry, names: [...entry.names] });
+    }
+  }
+  return [...byPath.values()];
 }
 
 // ─────────────────────────────────────────────────────────
@@ -1486,8 +1543,10 @@ const DEFAULT_REAL_USAGE_FILTER: Required<Omit<RealUsageFilter, "nowMs">> = {
 
 /** Per-adapter scan result returned by {@link scanOneAdapter}. */
 export interface AdapterScanResult {
-  /** Adapter id (matches `enumerateAdapterDirs().name`). */
+  /** Primary adapter id (matches `enumerateAdapterDirs().name`). */
   name: string;
+  /** Every adapter id sharing this entry's resolved dir — see `enumerateAdapterDirs`'s dedup note. Always includes `name`. */
+  names: string[];
   /** Total event rows across every `*.db` in this adapter's sessions dir. */
   eventCount: number;
   /** Total distinct session_meta rows across every db. */
@@ -1525,6 +1584,7 @@ function scanOneAdapter(
 ): AdapterScanResult {
   const result: AdapterScanResult = {
     name: entry.name,
+    names: entry.names,
     eventCount: 0,
     sessionCount: 0,
     dataBytes: 0,
@@ -1676,7 +1736,7 @@ export function getMultiAdapterLifetimeStats(opts?: {
 /** Aggregated multi-adapter real-bytes stats. */
 export interface MultiAdapterRealBytesStats extends RealBytesStats {
   /** Per-adapter row in the same shape as {@link RealBytesStats}, keyed by name. */
-  perAdapter: Array<RealBytesStats & { name: string }>;
+  perAdapter: Array<RealBytesStats & { name: string; names: string[] }>;
 }
 
 /**
@@ -1727,7 +1787,7 @@ export function getMultiAdapterRealBytesStats(opts?: {
       one.contentBytes += adapterContentBytes;
       sum.contentBytes += adapterContentBytes;
     }
-    perAdapter.push({ name: entry.name, ...one });
+    perAdapter.push({ name: entry.name, names: entry.names, ...one });
     sum.eventDataBytes += one.eventDataBytes;
     sum.bytesAvoided   += one.bytesAvoided;
     sum.bytesReturned  += one.bytesReturned;

@@ -64,16 +64,23 @@ import { hashProjectDirCanonical } from "../session/db.js";
  * Callers append `context-mode/<sessions|memory|...>` themselves (same
  * contract as before), so this returns the PARENT of that folder, not the
  * folder itself — e.g. `%LOCALAPPDATA%`, not `%LOCALAPPDATA%\context-mode`.
+ *
+ * `homeOverride` lets callers (analytics.ts's `enumerateAdapterDirs`) supply
+ * an explicit home directory instead of relying on the ambient `homedir()`
+ * mock seam — see PR #866: a resolver that reads ambient state from deep in
+ * the call graph instead of a parameter makes it easy for ONE branch to
+ * silently ignore a caller-supplied override while others honor it.
  */
-function defaultGlobalDataRoot(env: NodeJS.ProcessEnv): string {
+function defaultGlobalDataRoot(env: NodeJS.ProcessEnv, homeOverride?: string): string {
+  const home = homeOverride ?? homedir();
   if (process.platform === "win32") {
-    return join(homedir(), "AppData", "Local");
+    return join(home, "AppData", "Local");
   }
   if (process.platform === "darwin") {
-    return join(homedir(), "Library", "Application Support");
+    return join(home, "Library", "Application Support");
   }
   const xdg = env.XDG_DATA_HOME?.trim();
-  return xdg ? resolve(xdg) : join(homedir(), ".local", "share");
+  return xdg ? resolve(xdg) : join(home, ".local", "share");
 }
 
 /**
@@ -88,11 +95,17 @@ function defaultGlobalDataRoot(env: NodeJS.ProcessEnv): string {
  * Mirrors the `resolveClaudeConfigDir` contract for env-var handling
  * (whitespace guard, tilde expansion, relative-path resolution) so users
  * get one consistent set of rules across every override site.
+ *
+ * `homeOverride` — see `defaultGlobalDataRoot`'s doc comment. Only affects
+ * the OS-default branch; an explicit `CONTEXT_MODE_HOME`/`CONTEXT_MODE_DATA_DIR`
+ * always wins regardless of `homeOverride`, same as it wins regardless of
+ * ambient `homedir()`.
  */
 export function resolveContextModeDataRoot(
   env: NodeJS.ProcessEnv = process.env,
+  homeOverride?: string,
 ): string {
-  return resolveContextModeDataRootOverride(env) ?? defaultGlobalDataRoot(env);
+  return resolveContextModeDataRootOverride(env) ?? defaultGlobalDataRoot(env, homeOverride);
 }
 
 /**
