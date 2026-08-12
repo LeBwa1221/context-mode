@@ -9,9 +9,9 @@
 import type DatabaseConstructor from "better-sqlite3";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { createRequire } from "node:module";
-import { existsSync, unlinkSync, renameSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { existsSync, unlinkSync, renameSync, readdirSync, statSync, mkdirSync, copyFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 // v1.0.130 — `acquireDbLock` + `locking_mode = EXCLUSIVE` were REMOVED.
 // See docs/adr/0001-sessiondb-multi-writer.md for the architectural
 // rationale. The short version: SessionDB is multi-writer-safe and the
@@ -481,6 +481,101 @@ export function renameCorruptDB(dbPath: string): void {
       renameSync(dbPath + suffix, `${dbPath}${suffix}.corrupt-${ts}`);
     } catch { /* file may not exist */ }
   }
+}
+
+// ─────────────────────────────────────────────────────────
+// maint/global-store — cross-profile legacy DB adoption
+// ─────────────────────────────────────────────────────────
+
+/**
+ * One-shot migration for the move from per-profile storage to a single
+ * global store. Before this fix, the SAME project got a SEPARATE content/
+ * session DB under each host profile (`~/.claude`, `~/.claude-ime`,
+ * `~/.claude-devcom`, ...) because storage was rooted at the profile's own
+ * config dir. Now that storage resolves to one global root
+ * (resolveContextModeDataRoot, src/adapters/base.ts), a project opened for
+ * the first time under the new root would otherwise start with an EMPTY
+ * database even though a profile-scoped one already has months of history.
+ *
+ * If `newDbPath` doesn't exist yet, scans every dot-directory directly
+ * under `homedir()` (the legacy `~/.claude*`, `~/.codex`, `~/.cursor`, ...
+ * profile roots) for `<dir>/context-mode/<subdir>/<fileName>`, and adopts
+ * the LARGEST match by file size (the most complete history) by COPYING it
+ * into place — legacy files are never deleted, per the "never delete old
+ * files" requirement.
+ *
+ * Concurrency: safe when several sessions start simultaneously. Both the
+ * existence check and the final placement race, but every racer computes
+ * the same "largest legacy file" deterministically from the same
+ * read-only scan, copies it to a PID+timestamp-unique temp file beside the
+ * destination, then `renameSync`s into place. Same-directory rename is
+ * atomic on both POSIX and Windows (NTFS), so whichever racer renames last
+ * simply overwrites an equivalent copy — never a partial or corrupt file.
+ * A racer that loses the rename (destination already claimed) removes its
+ * own temp file and returns whether the destination now exists.
+ *
+ * Returns true if a legacy DB was adopted (or already had been by a
+ * concurrent racer), false if there was nothing to adopt.
+ */
+export function adoptLargestLegacyDb(opts: {
+  newDbPath: string;
+  /** "content" or "sessions" — the subdir under <profile>/context-mode/. */
+  subdir: string;
+  /** Basename to look for, e.g. `${projectHash}.db`. */
+  fileName: string;
+  log?: (message: string) => void;
+}): boolean {
+  const { newDbPath, subdir, fileName, log } = opts;
+  if (existsSync(newDbPath)) return false;
+
+  let home: string;
+  let entries: string[];
+  try {
+    home = homedir();
+    entries = readdirSync(home);
+  } catch {
+    return false;
+  }
+
+  let best: { path: string; size: number } | null = null;
+  for (const entry of entries) {
+    if (!entry.startsWith(".")) continue; // profile dirs are all dotfiles (.claude, .codex, ...)
+    const candidate = join(home, entry, "context-mode", subdir, fileName);
+    let st;
+    try {
+      st = statSync(candidate);
+    } catch {
+      continue; // not present under this profile
+    }
+    if (!st.isFile()) continue;
+    if (!best || st.size > best.size) best = { path: candidate, size: st.size };
+  }
+  if (!best) return false;
+
+  try {
+    mkdirSync(dirname(newDbPath), { recursive: true });
+    // Copy the main file plus any WAL/SHM sidecars so an active
+    // not-yet-checkpointed WAL isn't silently dropped by the migration.
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const src = best.path + suffix;
+      if (!existsSync(src)) continue;
+      const tmp = `${newDbPath}${suffix}.adopting-${process.pid}-${Date.now()}`;
+      try {
+        copyFileSync(src, tmp);
+        renameSync(tmp, newDbPath + suffix);
+      } catch {
+        try { unlinkSync(tmp); } catch { /* ignore */ }
+      }
+    }
+  } catch {
+    return existsSync(newDbPath); // best-effort — a concurrent racer may have won
+  }
+
+  if (existsSync(newDbPath)) {
+    log?.(`context-mode: adopted legacy DB ${best.path} (${best.size} bytes) -> ${newDbPath}`);
+    return true;
+  }
+  return false;
 }
 
 // ─────────────────────────────────────────────────────────

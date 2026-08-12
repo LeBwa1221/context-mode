@@ -6,7 +6,7 @@
  * the shared package.
  */
 
-import { SQLiteBase, defaultDBPath } from "../db-base.js";
+import { SQLiteBase, defaultDBPath, adoptLargestLegacyDb } from "../db-base.js";
 import type { PreparedStatement } from "../db-base.js";
 import type { SessionEvent } from "../types.js";
 import type { ProjectAttribution } from "./project-attribution.js";
@@ -474,7 +474,19 @@ export function resolveContentStorePath(opts: {
     } catch {
       // Race or permission issue — caller will create canonicalPath fresh.
     }
+    if (existsSync(canonicalPath)) return canonicalPath;
   }
+
+  // maint/global-store: contentDir is now a global root shared across
+  // profiles, so a project resolving here for the first time may still
+  // have a populated per-profile DB sitting under an old profile's
+  // ~/.claude*/context-mode/content/. Adopt the largest one rather than
+  // starting empty. Never deletes the legacy file.
+  adoptLargestLegacyDb({
+    newDbPath: canonicalPath,
+    subdir: STORAGE_CONTENT_SUBDIR,
+    fileName: `${canonicalHash}.db`,
+  });
   return canonicalPath;
 }
 
@@ -545,6 +557,19 @@ export function resolveSessionPath(opts: {
       // Race or permission issue — caller will create canonicalPath on first
       // write. Better to lose this rename than to throw and break ctx_stats.
     }
+    if (existsSync(canonicalPath)) return canonicalPath;
+  }
+
+  // maint/global-store: sessionsDir is now a global root. Only the main
+  // SessionDB file (.db) is worth cross-profile adoption — sidecar
+  // extensions (-events.md, .cleanup) are cheap to regenerate and
+  // "largest file wins" isn't a meaningful heuristic for them.
+  if (ext === ".db") {
+    adoptLargestLegacyDb({
+      newDbPath: canonicalPath,
+      subdir: STORAGE_SESSIONS_SUBDIR,
+      fileName: `${canonicalHash}${suffix}${ext}`,
+    });
   }
   return canonicalPath;
 }
