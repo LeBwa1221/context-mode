@@ -53,20 +53,25 @@ export type HookType = (typeof HOOK_TYPES)[keyof typeof HOOK_TYPES];
  */
 export const EXTERNAL_MCP_MATCHER_PATTERN = "mcp__";
 
-/** Tools that context-mode's PreToolUse hook intercepts. */
+/**
+ * Tools that context-mode's PreToolUse hook intercepts.
+ *
+ * Kept in sync with hooks/hooks.json's PreToolUse matchers (#529 drift guard).
+ * Grep and the explicit `mcp__plugin_context-mode_context-mode__ctx_{execute,
+ * execute_file,batch_execute}` entries were dropped from hooks.json (d292acb,
+ * f67bc9b): the ctx_* entries were redundant with EXTERNAL_MCP_MATCHER_PATTERN
+ * ("mcp__" already matches them as a substring, and double-spawned
+ * pretooluse.mjs — upstream #1000), and Grep's routing was a one-shot tip
+ * that cost a ~78-85ms hook spawn on every call after the first. Standalone
+ * installs get the same de-duplication and perf benefit by mirroring the
+ * removal here rather than being the only install path still paying for it.
+ */
 export const PRE_TOOL_USE_MATCHERS = [
   "Bash",
   "PowerShell",
   "WebFetch",
   "Read",
-  "Grep",
   "Agent",
-  "mcp__plugin_context-mode_context-mode__ctx_execute",
-  "mcp__plugin_context-mode_context-mode__ctx_execute_file",
-  "mcp__plugin_context-mode_context-mode__ctx_batch_execute",
-  // Note: standalone installs register as "context-mode" → mcp__context-mode__ctx_* names.
-  // These are matched by EXTERNAL_MCP_MATCHER_PATTERN ("mcp__") below, so no explicit entries
-  // are needed here. Keeping this list plugin-specific preserves the hooks.json drift guard.
   EXTERNAL_MCP_MATCHER_PATTERN,
 ] as const;
 
