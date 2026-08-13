@@ -93,8 +93,10 @@ await runHook(async () => {
 
     // ─── D2 PRD Phase 3/4: redirect marker — emit byte-accounting event ───
     // PreToolUse wrote `context-mode-redirect-${sessionId}.txt` for tools whose
-    // output we kept out of the model's context window (curl/wget, WebFetch,
-    // large Read). Format: `tool:type:bytesAvoided:commandSummary` (Override C).
+    // output we kept out of the model's context window (curl/wget, large Read).
+    // WebFetch no longer writes this marker (#927) — it's an advisory nudge
+    // now, not a deny, so nothing is actually kept out.
+    // Format: `tool:type:bytesAvoided:commandSummary` (Override C).
     try {
       const redirectPath = resolve(tmpdir(), `context-mode-redirect-${sessionId}.txt`);
       let redirectData;

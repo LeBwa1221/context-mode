@@ -539,22 +539,36 @@ describe("Kimi pretooluse hook script", () => {
     expect(parsed.hookSpecificOutput).toHaveProperty("hookEventName", "PreToolUse");
   });
 
-  it("blocks WebFetch via deny response", () => {
-    // WebFetch is routed to "deny"; Bash+curl is routed to "modify" which
-    // is silently dropped by Kimi's deny-only runner.
-    const hookScript = resolve(__dirname, "../../hooks/kimi/pretooluse.mjs");
-    const input = JSON.stringify({
-      tool_name: "WebFetch",
-      tool_input: { url: "https://example.com" },
-      session_id: "sess-2",
-      cwd: "/tmp",
-    });
-    const output = execFileSync(process.execPath, [hookScript], {
-      input,
-      encoding: "utf-8",
-      timeout: 5000,
-    });
-    const parsed = JSON.parse(output);
-    expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+  it("blocks a security-policy-denied Bash command via deny response", () => {
+    // WebFetch used to be a hard deny; downgraded to an advisory (#927) which
+    // Kimi's deny-only runner silently drops (its "context" formatter returns
+    // null - Kimi's HookResult has no additionalContext field), same as the
+    // "modify" action Bash+curl already produces. A security-policy deny is
+    // the reliable "deny" example for this format check now.
+    const projectDir = mkdtempSync(join(tmpdir(), "kimi-deny-policy-"));
+    mkdirSync(join(projectDir, ".claude"), { recursive: true });
+    writeFileSync(
+      join(projectDir, ".claude", "settings.local.json"),
+      JSON.stringify({ permissions: { deny: ["Bash(sudo *)"] } }),
+      "utf-8",
+    );
+    try {
+      const hookScript = resolve(__dirname, "../../hooks/kimi/pretooluse.mjs");
+      const input = JSON.stringify({
+        tool_name: "Bash",
+        tool_input: { command: "sudo whoami" },
+        session_id: "sess-2",
+        cwd: projectDir,
+      });
+      const output = execFileSync(process.execPath, [hookScript], {
+        input,
+        encoding: "utf-8",
+        timeout: 5000,
+      });
+      const parsed = JSON.parse(output);
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+    } finally {
+      try { rmSync(projectDir, { recursive: true, force: true }); } catch {}
+    }
   });
 });

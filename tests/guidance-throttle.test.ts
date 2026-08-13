@@ -74,12 +74,13 @@ describe("guidance throttle", () => {
   });
 
   it("deny/modify actions are NEVER throttled", () => {
-    // WebFetch deny should always fire
-    const d1 = routePreToolUse("WebFetch", { url: "https://example.com" }, PROJECT_DIR);
-    const d2 = routePreToolUse("WebFetch", { url: "https://other.com" }, PROJECT_DIR);
+    // Bash curl/wget redirect (modify) should always fire - unlike WebFetch's
+    // advisory (#927), this path isn't guidanceOnce/guidancePeriodic wrapped.
+    const d1 = routePreToolUse("Bash", { command: "curl https://example.com" }, PROJECT_DIR);
+    const d2 = routePreToolUse("Bash", { command: "curl https://other.com" }, PROJECT_DIR);
 
-    expect(d1?.action).toBe("deny");
-    expect(d2?.action).toBe("deny");
+    expect(d1?.action).toBe("modify");
+    expect(d2?.action).toBe("modify");
   });
 
   it("resetGuidanceThrottle clears state (simulates new session)", () => {

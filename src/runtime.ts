@@ -616,13 +616,6 @@ export function getRuntimeSummary(runtimes: RuntimeMap): string {
       `  C#:         ${runtimes.csharp} (${getVersion(runtimes.csharp)})`,
     );
 
-  if (!bunPreferred) {
-    lines.push("");
-    lines.push(
-      "  Tip: Install Bun for 3-5x faster JS/TS execution → https://bun.sh",
-    );
-  }
-
   return lines.join("\n");
 }
 

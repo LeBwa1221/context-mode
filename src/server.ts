@@ -70,7 +70,7 @@ import { getHookScriptPaths } from "./util/hook-config.js";
 import { stripJsonComments } from "./util/jsonc.js";
 import { resolveClaudeConfigDir } from "./util/claude-config.js";
 import { resolveProjectDir } from "./util/project-dir.js";
-import { loadDatabase } from "./db-base.js";
+import { loadDatabase, hasModernSqlite } from "./db-base.js";
 import { AnalyticsEngine, formatReport, getConversationStats, getContentBytesAllSessions, getConversationWindowStats, getLifetimeStats, getMultiAdapterLifetimeStats, getRealBytesStats, pricePerToken } from "./session/analytics.js";
 const __pkg_dir = dirname(fileURLToPath(import.meta.url));
 const VERSION: string = (() => {
@@ -1034,6 +1034,35 @@ function sanitizeSessionId(raw: string): string {
   return SESSION_ID_RE.test(raw) ? raw : `pid-${process.ppid}`;
 }
 
+/**
+ * Runtime status — factual only, no speed claims. tools/bench-hooks.mjs
+ * measured Bun's per-spawn startup cost on Windows (~140ms more than Node,
+ * likely Defender scanning the unsigned binary — oven-sh/bun#16981/#19155)
+ * as unrecoverable for hooks, which do ~30-40ms of work per invocation and
+ * exit. Bun's engine itself measured ~1.6x faster than Node for sustained
+ * CPU-bound work on the same machine — the deficit is about process-spawn
+ * frequency, not the runtime being generally slower. Hooks spawn a fresh
+ * process per call, so they lose; the long-running MCP server pays the
+ * spawn tax once, but Bun vs Node hasn't been measured there yet.
+ */
+function getRuntimeStatusLines(): string[] {
+  const isBun = typeof (globalThis as any).Bun !== "undefined";
+  const serverRuntime = isBun ? `Bun ${(globalThis as any).Bun.version}` : `Node ${process.version}`;
+  const sqliteDriver = isBun
+    ? "bun:sqlite"
+    : hasModernSqlite()
+      ? "node:sqlite (falls back to better-sqlite3 if FTS5 is unavailable)"
+      : "better-sqlite3";
+  const hookMode = process.env.CONTEXT_MODE_HOOK_RUNTIME || "auto";
+  const bunOnPath = hasBunRuntime();
+  return [
+    `Server runtime: ${serverRuntime}`,
+    `SQLite driver: ${sqliteDriver}`,
+    `Bun on PATH: ${bunOnPath ? "yes" : "no"}`,
+    `Hook runtime mode: ${hookMode} (${process.platform === "win32" ? "hooks default to Node on Windows - Bun's per-spawn startup cost outweighs its engine speed for these short-lived processes, see tools/bench-hooks.mjs" : "override with CONTEXT_MODE_HOOK_RUNTIME=bun|node"})`,
+  ];
+}
+
 function getStatsFilePath(): string {
   const raw = process.env.CLAUDE_SESSION_ID || `pid-${process.ppid}`;
   const sessionId = sanitizeSessionId(raw);
@@ -1271,9 +1300,6 @@ function checkFilePathDenyPolicy(
 
 // Build description dynamically based on detected runtimes
 const langList = available.join(", ");
-const bunNote = hasBunRuntime()
-  ? " (Bun detected — JS/TS runs 3-5x faster)"
-  : "";
 
 // ─────────────────────────────────────────────────────────
 // Helper: smart snippet extraction — returns windows around
@@ -1734,7 +1760,7 @@ server.registerTool(
       idempotentHint: false,
       openWorldHint: true,
     },
-    description: `Run code in a sandboxed subprocess.${bunNote} Languages: ${langList}.
+    description: `Run code in a sandboxed subprocess. Languages: ${langList}.
 
 Only console.log() output enters your conversation. Use instead of Bash to derive an answer FROM data (filter, count, aggregate). Does NOT persist file writes - use Write/Edit for that.
 
@@ -4115,6 +4141,8 @@ server.registerTool(
       text = formatReport(report, VERSION, _latestVersion, (lifetime || multiAdapter) ? { lifetime, multiAdapter } : undefined);
     }
 
+    text += "\n\n" + getRuntimeStatusLines().map((l) => `  ${l}`).join("\n");
+
     return trackResponse("ctx_stats", {
       content: [{ type: "text" as const, text }],
     });
@@ -4165,11 +4193,9 @@ server.registerTool(
     const pct = ((available.length / total) * 100).toFixed(0);
     lines.push(`[OK] Runtimes: ${available.length}/${total} (${pct}%) — ${available.join(", ")}`);
 
-    // Performance
-    if (hasBunRuntime()) {
-      lines.push("[OK] Performance: FAST (Bun)");
-    } else {
-      lines.push("[WARN] Performance: NORMAL — install Bun for 3-5x speed boost");
+    // Runtime status — factual, no speed claims (see getRuntimeStatusLines).
+    for (const line of getRuntimeStatusLines()) {
+      lines.push(`[OK] ${line}`);
     }
 
     const sessionStorage = resolveSessionStorageDir(getDefaultSessionDir);
@@ -4935,12 +4961,6 @@ async function main() {
   if (process.stdin.isTTY) {
     console.error(`Context Mode MCP server v${VERSION} running on stdio`);
     console.error(`Detected runtimes:\n${getRuntimeSummary(runtimes)}`);
-    if (!hasBunRuntime()) {
-      console.error(
-        "\nPerformance tip: Install Bun for 3-5x faster JS/TS execution",
-      );
-      console.error("  curl -fsSL https://bun.sh/install | bash");
-    }
   }
 }
 
