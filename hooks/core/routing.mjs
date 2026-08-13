@@ -80,7 +80,23 @@ function getExternalMcpNudgeEvery() {
 // #1037); that stranded subagents whose tool allowlists don't include the
 // context-mode MCP tools (they can neither WebFetch nor reach the sandboxed
 // alternative — #1037) and broke claude.ai artifact URLs (#1006, #984). It's
-// now a one-shot advisory, same shape as the Grep nudge below.
+// now an advisory nudge, same shape as the external-MCP nudge above.
+// Default 25: WebFetch calls are typically less frequent per session than
+// external-MCP loops, so a longer cadence still lands the nudge near the
+// first few calls without re-showing it constantly.
+const WEBFETCH_NUDGE_DEFAULT = 25;
+const WEBFETCH_NUDGE_ENV = "CONTEXT_MODE_WEBFETCH_NUDGE_EVERY";
+const WEBFETCH_NUDGE_SUPPRESS_ENV = "CONTEXT_MODE_SUPPRESS_WEBFETCH_NUDGE";
+
+function getWebFetchNudgeEvery() {
+  const raw = process.env[WEBFETCH_NUDGE_ENV];
+  if (raw == null || raw === "") return WEBFETCH_NUDGE_DEFAULT;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < EXTERNAL_MCP_NUDGE_MIN || parsed > EXTERNAL_MCP_NUDGE_MAX) {
+    return WEBFETCH_NUDGE_DEFAULT;
+  }
+  return parsed;
+}
 
 // #817: size threshold so small Bash calls skip the routing nudge.
 //
@@ -881,19 +897,24 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
   // Was a hard deny; downgraded because the deny fired even when the MCP
   // alternative was unreachable (subagents without ctx_* tools — #1037) and
   // broke claude.ai artifact URLs (#1006, #984, fixed separately upstream).
-  // The call is always allowed through now — this only adds guidance, once
-  // per session (same shape as the Grep nudge, f67bc9b), not on every call.
+  // The call is always allowed through now — this only adds guidance, on the
+  // same periodic cadence as the external-MCP nudge above, never repeated
+  // every call. mcpRedirect's mcpToolsAvailable/isMCPReady() gate already
+  // means the nudge itself silently no-ops when the sandbox isn't reachable.
   // No redirectMeta here: unlike a real deny+redirect, the model can ignore
   // this advisory and still run WebFetch, so nothing was actually kept out
   // of context — attaching bytesAvoided would report savings that didn't
   // happen (see PostToolUse's redirect-marker handling in pretooluse.mjs).
   if (canonical === "WebFetch") {
-    const url = getWebFetchUrl(toolInput);
-    const webFetchGuidance = `context-mode: Call ${t("ctx_fetch_and_index")}(url: "${url}", source: "...") to fetch + index the page, then ${t("ctx_search")}(queries: [...]) to query the indexed content — the raw page bytes stay in storage instead of entering your conversation. Or call ${t("ctx_execute")}(language, code) to derive your answer in one round trip without persisting the response. WebFetch still works directly when the sandbox tools aren't available to you.`;
-    return mcpRedirect(
-      guidanceOnce("webfetch", webFetchGuidance, sessionId),
-      mcpToolsAvailable,
-    );
+    if (!process.env[WEBFETCH_NUDGE_SUPPRESS_ENV]) {
+      const url = getWebFetchUrl(toolInput);
+      const webFetchGuidance = `context-mode: Call ${t("ctx_fetch_and_index")}(url: "${url}", source: "...") to fetch + index the page, then ${t("ctx_search")}(queries: [...]) to query the indexed content — the raw page bytes stay in storage instead of entering your conversation. Or call ${t("ctx_execute")}(language, code) to derive your answer in one round trip without persisting the response. WebFetch still works directly when the sandbox tools aren't available to you.`;
+      return mcpRedirect(
+        guidancePeriodic("webfetch", webFetchGuidance, sessionId, getWebFetchNudgeEvery()),
+        mcpToolsAvailable,
+      );
+    }
+    return null;
   }
 
   // ─── Agent: inject context-mode routing into subagent prompts ───
