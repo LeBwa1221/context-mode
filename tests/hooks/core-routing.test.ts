@@ -426,25 +426,48 @@ describe("routePreToolUse", () => {
     });
 
     it("still redirects non-artifact claude.ai URLs (#938)", () => {
-      const result = routePreToolUse("WebFetch", { url: "https://claude.ai/settings" });
+      const sessionId = "webfetch-938-non-artifact";
+      resetGuidanceThrottle(sessionId);
+      const result = routePreToolUse(
+        "WebFetch",
+        { url: "https://claude.ai/settings" },
+        undefined,
+        "claude-code",
+        sessionId,
+      );
       expect(result).not.toBeNull();
-      expect(result!.action).toBe("deny");
+      expect(result!.action).toBe("context");
+      expect(result!.additionalContext).toContain("fetch_and_index");
     });
 
     it("still redirects a lookalike host, not just a substring match (#938)", () => {
-      const result = routePreToolUse("WebFetch", {
-        url: "https://claude.ai.evil.com/code/artifact/51de1b8d-61cb-488e-a964-547ef217f5e9",
-      });
+      const sessionId = "webfetch-938-lookalike-host";
+      resetGuidanceThrottle(sessionId);
+      const result = routePreToolUse(
+        "WebFetch",
+        { url: "https://claude.ai.evil.com/code/artifact/51de1b8d-61cb-488e-a964-547ef217f5e9" },
+        undefined,
+        "claude-code",
+        sessionId,
+      );
       expect(result).not.toBeNull();
-      expect(result!.action).toBe("deny");
+      expect(result!.action).toBe("context");
+      expect(result!.additionalContext).toContain("fetch_and_index");
     });
 
     it("still redirects a plain-http claude.ai Artifact URL (#938)", () => {
-      const result = routePreToolUse("WebFetch", {
-        url: "http://claude.ai/code/artifact/51de1b8d-61cb-488e-a964-547ef217f5e9",
-      });
+      const sessionId = "webfetch-938-plain-http";
+      resetGuidanceThrottle(sessionId);
+      const result = routePreToolUse(
+        "WebFetch",
+        { url: "http://claude.ai/code/artifact/51de1b8d-61cb-488e-a964-547ef217f5e9" },
+        undefined,
+        "claude-code",
+        sessionId,
+      );
       expect(result).not.toBeNull();
-      expect(result!.action).toBe("deny");
+      expect(result!.action).toBe("context");
+      expect(result!.additionalContext).toContain("fetch_and_index");
     });
 
     it("treats agy read_url_content URL payloads as WebFetch", () => {
