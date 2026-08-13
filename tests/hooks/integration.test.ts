@@ -659,15 +659,15 @@ describe("Standalone Tool Name Format in ROUTING_BLOCK", () => {
     assert.ok(!ctx.includes(PLUGIN_PREFIX + "ctx_execute"), "Grep nudge must not contain plugin-format names in standalone mode");
   });
 
-  test("WebFetch advisory uses plugin-format fetch_and_index tool name", () => {
+  test("WebFetch advisory uses standalone-format fetch_and_index tool name", () => {
     // WebFetch is an advisory nudge now, not a deny (#927/#1006/#984/#1037) -
     // the tool-name check applies to additionalContext, not a deny reason.
     const result = runHook({ tool_name: "WebFetch", tool_input: { url: "https://example.com" } });
     assert.equal(result.exitCode, 0);
     const parsed = JSON.parse(result.stdout);
     const ctx = parsed.hookSpecificOutput.additionalContext;
-    assert.ok(ctx.includes(PLUGIN_PREFIX + "ctx_fetch_and_index"), "Expected plugin-format ctx_fetch_and_index in WebFetch advisory");
-    assert.ok(!ctx.includes(SHORT_PREFIX + "ctx_fetch_and_index"), "WebFetch advisory must not contain short-form");
+    assert.ok(ctx.includes(STANDALONE_PREFIX + "ctx_fetch_and_index"), "Expected standalone ctx_fetch_and_index in WebFetch advisory");
+    assert.ok(!ctx.includes(PLUGIN_PREFIX + "ctx_fetch_and_index"), "WebFetch advisory must not contain plugin-format names in standalone mode");
   });
 
   test("Bash inline-HTTP redirect uses standalone-format execute tool name (in deny reason)", () => {
