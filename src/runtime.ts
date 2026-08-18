@@ -396,6 +396,32 @@ export function hasBunRuntime(): boolean {
 }
 
 /**
+ * Memoized in-memory singleton wrapping {@link detectRuntimes}.
+ *
+ * detectRuntimes() spawns up to 12 `where`/`command -v` + `--version` probes
+ * (~1.4s on Windows at ~184ms/spawn). The MCP server is a short-lived
+ * per-session process, so a lazy singleton captures the full startup win
+ * with none of the invalidation cost a disk/TTL cache would add — and
+ * `runtime.shell`/`runtime.javascript` are consumed as literal binary paths
+ * at dispatch time (not just description text), so caching stale paths for
+ * the life of one process is the existing contract, not a new risk (see the
+ * #800 liveness guard in {@link resolveJavascriptRuntime}, which already
+ * protects the javascript path within a single detection).
+ *
+ * Call at first real dispatch (ctx_execute, ctx_batch_execute, etc.), never
+ * at module scope — that would just move the eager probe from one line to
+ * another.
+ */
+let _runtimesCache: RuntimeMap | null = null;
+
+export function getRuntimes(): RuntimeMap {
+  if (!_runtimesCache) {
+    _runtimesCache = detectRuntimes();
+  }
+  return _runtimesCache;
+}
+
+/**
  * Resolved JS runtime for hook spawn commands. `path` is the absolute (or
  * bare-name on POSIX where PATH resolution is reliable) binary path.
  * `isBun` is true only when we successfully probed a Bun ≥1.0 install.

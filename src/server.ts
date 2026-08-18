@@ -25,7 +25,7 @@ import {
   evaluateProjectContainment,
 } from "./security.js";
 import {
-  detectRuntimes,
+  getRuntimes,
   getRuntimeSummary,
   getAvailableLanguages,
   hasBunRuntime,
@@ -140,8 +140,6 @@ if (process.env.CONTEXT_MODE_EMBEDDED_PLUGIN_TOOLS !== "1") {
   });
 }
 
-const runtimes = detectRuntimes();
-const available = getAvailableLanguages(runtimes);
 export const server = new McpServer({
   name: "context-mode",
   version: VERSION,
@@ -419,7 +417,6 @@ export function installStrictClientSchemaCompat(target: McpServer = server): voi
 }
 
 const executor = new PolyglotExecutor({
-  runtimes,
   projectRoot: () => getProjectDir(),
 });
 
@@ -1492,8 +1489,12 @@ function checkFilePathDenyPolicy(
   return null;
 }
 
-// Build description dynamically based on detected runtimes
-const langList = available.join(", ");
+// Static, not probed: listing all 12 supported languages here is honest
+// prose (a missing runtime still produces a clear call-time error), and it
+// keeps tool registration off the runtime-detection path. Detecting real
+// availability here would mean probing at startup, on every session -
+// exactly the cost this list is designed to avoid.
+const langList = "javascript, typescript, python, shell, ruby, go, rust, php, perl, r, elixir, csharp";
 
 // ─────────────────────────────────────────────────────────
 // Helper: smart snippet extraction — returns windows around
@@ -3993,7 +3994,7 @@ WHEN NOT: a single command with no follow-up query - use ctx_execute directly.`,
       // ensureFsPreload re-creates the temp file if an OS temp cleaner removed
       // it since startup — injecting a missing --require kills every node
       // child with MODULE_NOT_FOUND (#951).
-      const nodeOptsPrefix = buildBatchNodeOptionsPrefix(runtimes.shell, ensureFsPreload());
+      const nodeOptsPrefix = buildBatchNodeOptionsPrefix(getRuntimes().shell, ensureFsPreload());
 
       // Full stdout is preserved per-command and indexed into FTS5 (Issue #61, #197).
       // Concurrency>1 switches to a worker pool with per-command timeouts.
@@ -4397,7 +4398,10 @@ server.registerTool(
     // current package root, diagnose the root Codex will actually execute.
     const pluginRoot = getRuntimeAwarePackageRoot(currentPlatform);
 
-    // Runtimes
+    // Runtimes — probed here on demand (doctor is a diagnostic call, not the
+    // startup path).
+    const runtimes = getRuntimes();
+    const available = getAvailableLanguages(runtimes);
     const total = 11;
     const pct = ((available.length / total) * 100).toFixed(0);
     lines.push(`[OK] Runtimes: ${available.length}/${total} (${pct}%) — ${available.join(", ")}`);
@@ -4524,8 +4528,9 @@ server.registerTool(
       const signal = detectPlatform(clientInfo ?? undefined);
       platformId = signal.platform;
       platformFlag = ` --platform ${signal.platform}`;
-      nodeOpts = isInProcessPluginPlatform(signal.platform) && runtimes.javascript
-        ? { platform: signal.platform, jsRuntime: runtimes.javascript }
+      const jsRuntime = getRuntimes().javascript;
+      nodeOpts = isInProcessPluginPlatform(signal.platform) && jsRuntime
+        ? { platform: signal.platform, jsRuntime }
         : undefined;
     } catch {
       try { platformId = detectPlatform().platform; } catch { /* best effort — fall back to upgrade()'s own detect */ }
@@ -5169,7 +5174,7 @@ async function main() {
 
   if (process.stdin.isTTY) {
     console.error(`Context Mode MCP server v${VERSION} running on stdio`);
-    console.error(`Detected runtimes:\n${getRuntimeSummary(runtimes)}`);
+    console.error(`Detected runtimes:\n${getRuntimeSummary(getRuntimes())}`);
   }
 }
 

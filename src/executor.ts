@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash, randomBytes } from "node:crypto";
 import {
-  detectRuntimes,
+  getRuntimes,
   buildCommand,
   type RuntimeMap,
   type Language,
@@ -248,7 +248,9 @@ export class PolyglotExecutor {
    * to preserve constructor backward compatibility.
    */
   #projectRootResolver: () => string;
-  #runtimes: RuntimeMap;
+  // Explicit override only; unset means "resolve lazily via getRuntimes()"
+  // so construction never triggers the runtime probe (see #runtimes getter).
+  #runtimesOverride?: RuntimeMap;
 
   /** PIDs of backgrounded processes — killed on cleanup to prevent zombies. */
   #backgroundedPids = new Set<number>();
@@ -267,11 +269,18 @@ export class PolyglotExecutor {
     } else {
       this.#projectRootResolver = () => process.cwd();
     }
-    this.#runtimes = opts?.runtimes ?? detectRuntimes();
+    this.#runtimesOverride = opts?.runtimes;
   }
 
   get #projectRoot(): string {
     return this.#projectRootResolver();
+  }
+
+  // Resolved on first access, not at construction — construction happens at
+  // module load in server.ts, and probing there is exactly the startup cost
+  // this class was changed to avoid.
+  get #runtimes(): RuntimeMap {
+    return this.#runtimesOverride ?? getRuntimes();
   }
 
   get runtimes(): RuntimeMap {
