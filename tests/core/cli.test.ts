@@ -373,18 +373,32 @@ async function loadEnsureNativeCompat(): Promise<(pluginRoot: string) => void> {
   const replaceBinaryMatch = src.match(/^function replaceActiveNativeBinaryFromCache\b[\s\S]*?^}/m);
   const codesignMatch = src.match(/^(?:export\s+)?function codesignBinary\b[\s\S]*?^}/m);
   const probeMatch = src.match(/^function probeNativeInChildProcess\b[\s\S]*?^}/m);
+  const alreadySyncedMatch = src.match(/^function alreadySynced\b[\s\S]*?^}/m);
   const replaceBinary = replaceBinaryMatch ? replaceBinaryMatch[0] + "\n" : "";
   const codesign = codesignMatch ? codesignMatch[0] + "\n" : "";
   const probe = probeMatch ? probeMatch[0] + "\n" : "";
+  const alreadySynced = alreadySyncedMatch ? alreadySyncedMatch[0] + "\n" : "";
+
+  // This harness reassembles ensureNativeCompat from regex-extracted source
+  // rather than importing the module, so every helper it calls must be listed
+  // above AND every fs binding those helpers use must be imported below. A
+  // missing one throws ReferenceError inside ensureNativeCompat's try block,
+  // which swallows it - the test then fails as if the logic were wrong rather
+  // than the harness incomplete. That is exactly what happened when
+  // alreadySynced/statSync were added.
+  if (replaceBinary.includes("alreadySynced(") && !alreadySynced) {
+    throw new Error("harness out of date: replaceActiveNativeBinaryFromCache calls alreadySynced, but it was not extracted from hooks/ensure-deps.mjs");
+  }
 
   const tmpFile = join(tmpdir(), `abi-test-${Date.now()}.mjs`);
   writeFileSync(tmpFile, [
-    'import { existsSync, copyFileSync, renameSync, unlinkSync } from "node:fs";',
+    'import { existsSync, copyFileSync, renameSync, unlinkSync, statSync } from "node:fs";',
     'import { resolve } from "node:path";',
     'import { createRequire } from "node:module";',
     'import { execSync } from "node:child_process";',
     helpers,
     codesign,
+    alreadySynced,
     replaceBinary,
     probe,
     `${match[0]}`,
