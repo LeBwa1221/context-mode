@@ -2,13 +2,15 @@
  * stats-output-format — Bugs #5, #6, #7, #8
  *
  * #5: "9 more categories" was hardcoded — must compute the real overflow.
- * #6: "~$0.42 saved" was a guess — must use Opus pricing ($15 / 1M tokens).
+ * #6: "~$0.42 saved" was a guess dressed up as money — net-savings rework
+ *     dropped the dollar figure entirely; bytes + a labeled token estimate
+ *     are the honest units now (see renderCostExample in analytics.ts).
  * #7: "3.0x" is meaningless — must read "3× longer sessions".
  * #8: No business-value framing — must end with a "Bottom line" footer.
  */
 
 import { describe, expect, test } from "vitest";
-import { formatReport, tokensToUsd } from "../../src/session/analytics.js";
+import { formatReport } from "../../src/session/analytics.js";
 import type {
   AdapterScanResult,
   ConversationStats,
@@ -65,20 +67,13 @@ function emptyLifetime(): LifetimeStats {
   };
 }
 
-describe("Opus pricing", () => {
-  test("tokensToUsd uses $5 per 1M input tokens (Opus 4.7/4.8 2026 rate)", () => {
-    expect(tokensToUsd(1_000_000)).toBe("$5.00");
-    expect(tokensToUsd(42_000)).toBe("$0.21");
-    expect(tokensToUsd(0)).toBe("$0.00");
-  });
-});
-
 describe("formatReport — Bugs #5/#6/#7/#8", () => {
-  test("includes Opus pricing line for the active session", () => {
+  test("hero line reports kept-out bytes and a labeled token estimate, no dollar figure", () => {
     const text = formatReport(baseReport(), "1.0.103", null, {
       lifetime: emptyLifetime(),
     });
-    expect(text).toMatch(/\$\d+\.\d{2}.*Opus/);
+    expect(text).toMatch(/kept out.*tokens est\./);
+    expect(text).not.toMatch(/\$/);
   });
 
   test("uses '× longer sessions' phrasing instead of bare ratio", () => {
@@ -111,10 +106,12 @@ describe("formatReport — Bugs #5/#6/#7/#8", () => {
     const text = formatReport(baseReport(), "1.0.103", null, {
       lifetime: { ...emptyLifetime(), totalEvents: 160, totalSessions: 40 },
     });
-    // Footer must include the session $ and lifetime $ summary.
+    // Footer must include the session and lifetime token-estimate summary.
+    // No dollar figure -- net-savings rework dropped it entirely.
     expect(text).toMatch(/talks less, remembers more, costs less/i);
-    expect(text).toMatch(/\$\d+\.\d{2} this session/);
-    expect(text).toMatch(/\$\d+(\.\d{2})? lifetime/);
+    expect(text).toMatch(/tokens est\. this session/);
+    expect(text).toMatch(/tokens est\. lifetime/);
+    expect(text).not.toMatch(/\$/);
   });
 
   test("renders the auto-memory block when files are present", () => {
@@ -327,12 +324,13 @@ describe("formatReport — Bugs #5/#6/#7/#8", () => {
     expect(text).toMatch(/All your work:/);
     expect(text).toMatch(/17,493 captures across 123 projects/);
 
-    // Section 4 — cost example + EXAMPLES disclaimer.
-    // Honest-savings fix: $ derives from kept-out tokens (without − with),
-    // not from the raw "without" total — 466.58 × 0.98-ish → 356.25 here
-    // because this fixture's realBytes measurement is authoritative.
-    expect(text).toMatch(/\$356\.25 of Opus 4\.7 tokens your team didn't burn/);
-    expect(text).toMatch(/Opus rates shown for context/);
+    // Section 4 — bytes/tokens summary, no dollar figure.
+    // Honest-savings fix: figure derives from kept-out tokens (without − with),
+    // not from the raw "without" total; net-savings rework dropped the $
+    // conversion entirely (it was a /4 guess priced at a hardcoded rate).
+    expect(text).toMatch(/kept out of context, lifetime/);
+    expect(text).toMatch(/tokens est\./);
+    expect(text).not.toMatch(/\$/);
 
     // Section 5 — auto-memory tally.
     expect(text).toMatch(/22 preferences picked up across 6 projects/);

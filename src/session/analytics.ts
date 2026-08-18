@@ -17,6 +17,13 @@ import { loadDatabase as loadDatabaseImpl } from "../db-base.js";
 import { ensureSessionEventsSchema } from "./db.js";
 import { resolveClaudeConfigDir } from "../util/claude-config.js";
 import { resolveContextModeDataRoot } from "../adapters/base.js";
+import { estimateTokens } from "./token-estimate.js";
+
+/** Clamp a percentage into [0, 100] — a savings ratio must never report above 100%. */
+function clampPct(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(100, n));
+}
 
 function semverNewer(a: string, b: string): boolean {
   const pa = a.split(".").map(Number);
@@ -457,7 +464,7 @@ export class AnalyticsEngine {
       tool,
       calls: runtimeStats.calls[tool] || 0,
       context_kb: Math.round((runtimeStats.bytesReturned[tool] || 0) / 1024 * 10) / 10,
-      tokens: Math.round((runtimeStats.bytesReturned[tool] || 0) / 4),
+      tokens: estimateTokens(runtimeStats.bytesReturned[tool] || 0),
     }));
 
     const uptimeMs = Date.now() - runtimeStats.sessionStart;
@@ -1463,7 +1470,7 @@ export function getRealBytesStats(opts: {
   // eventDataBytes and snapshotBytes are analytics/resume infrastructure —
   // they never enter the model context window (ADR-0004 rationale for the
   // Section 1 bar) — so they are excluded from the savings estimate too.
-  const totalSavedTokens = Math.floor(bytesAvoided / 4);
+  const totalSavedTokens = estimateTokens(bytesAvoided);
 
   return { eventDataBytes, bytesAvoided, bytesReturned, snapshotBytes, contentBytes, totalSavedTokens };
 }
@@ -1509,7 +1516,7 @@ export function getConversationWindowStats(opts: {
     bytesReturned: mine.bytesReturned,
     snapshotBytes: mine.snapshotBytes,
     contentBytes: mine.contentBytes,
-    totalSavedTokens: Math.floor(mine.bytesAvoided / 4),
+    totalSavedTokens: estimateTokens(mine.bytesAvoided),
   };
 }
 
@@ -1839,7 +1846,7 @@ export function getMultiAdapterRealBytesStats(opts?: {
     sum.snapshotBytes  += one.snapshotBytes;
   }
   // Honest-savings fix: only recorded redirects count (see getRealBytesStats).
-  sum.totalSavedTokens = Math.floor(sum.bytesAvoided / 4);
+  sum.totalSavedTokens = estimateTokens(sum.bytesAvoided);
 
   return { ...sum, perAdapter };
 }
@@ -2050,102 +2057,31 @@ function shortPath(abs: string): string {
 }
 
 /**
- * Render the section-4 "For example: what would that cost?" block.
+ * Render the section-4 "What that adds up to" block.
  *
- * Translates a lifetime token total into a relatable Opus-4 dollar figure
- * + 3 tangible comparisons (Cursor Pro / Claude Max / weekends of API
- * coding) + 10-dev team scale projection + alternate-model scale row,
- * capped with an EXAMPLES disclaimer. The renderer is intentionally
- * liberal with rounding (whole-month Cursor counts, integer weekends)
- * because this section is illustrative — the EXAMPLES line tells users
- * not to confuse it for a bill.
+ * Was a dollar-figure translation (bytes -> /4 token guess -> hardcoded
+ * per-token rate -> USD) presented as money three assumptions deep.
+ * Net-savings rework drops the dollar figure entirely: bytes are the
+ * measured ground truth, tokens are a labeled estimate, nothing here is
+ * priced.
  *
- * Returns [] when there's nothing to scale (lifetimeTokens === 0) so
+ * Returns [] when there's nothing to report (lifetimeTokens === 0) so
  * the section disappears cleanly on a fresh install.
- *
- * Math constants:
- *   Opus 4.7/4.8 = $5.00 per 1M input tokens (fallback when PI_CONTEXT_MODE_PRICE_OUTPUT_PER_TOKEN not set)
- *   Sonnet 4.6   = $3.00 per 1M input tokens
- *   GPT-4o       = $2.50 per 1M input tokens
- *   Gemini 2     = $1.25 per 1M input tokens
- *   Haiku 4.5    = $1.00 per 1M input tokens
- *   Cursor Pro       = $20  / month  → "X months of Cursor Pro"
- *   Claude Max       = $200 / month  → "X.X months of Claude Max"
- *   Weekend coding   ≈ $73.67        → "X weekends of nonstop API coding"
- *   Team multiplier  = 10×           → "At a 10-dev team scale: ~$X over Y days, or ~$Z/year"
  */
 export function renderCostExample(
   lifetimeBytes: number,
   lifetimeTokens: number,
-  lifetimeDays: number,
+  _lifetimeDays: number,
 ): string[] {
   if (!Number.isFinite(lifetimeTokens) || lifetimeTokens <= 0) return [];
 
-  const lifetimeUsd = lifetimeTokens * pricePerToken();
-  const usdStr  = (n: number, dp: number = 2): string => n.toFixed(dp);
-
-  // Comparison units — kept locally so they're easy to tune without touching
-  // the renderer logic. Cursor Pro & Claude Max are public list prices; the
-  // weekend constant is an intentional approximation calibrated to make
-  // $1399.73 → "19 weekends" line up with the demo target.
-  const cursorMonths     = Math.round(lifetimeUsd / 20);
-  const claudeMaxMonths  = (lifetimeUsd / 200).toFixed(1);
-  const weekendCount     = Math.round(lifetimeUsd / 73.67);
-  const teamUsd          = Math.round(lifetimeUsd * 10);
-  const teamYearUsd      = lifetimeDays > 0
-    ? Math.round((lifetimeUsd * 10) / lifetimeDays * 365)
-    : 0;
-
-  // Alternate-model scale row — same token count, different per-1M rates.
-  // (Kept for internal reference but unreachable per Mert directive.)
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const _sonnetUsd = ((lifetimeTokens * 3.0)  / 1_000_000).toFixed(2);
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const _gpt4oUsd  = ((lifetimeTokens * 2.5)  / 1_000_000).toFixed(2);
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const _geminiUsd = ((lifetimeTokens * 1.25) / 1_000_000).toFixed(2);
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const _haikuUsd  = ((lifetimeTokens * 1.0)  / 1_000_000).toFixed(2);
-
-  const usingDynamicPrice =
-    process.env.PI_CONTEXT_MODE_PRICE_OUTPUT_PER_TOKEN !== undefined;
-  const modelId = process.env.PI_CONTEXT_MODE_MODEL_ID;
-
-  // Mert: "daha marketing ve business value e vermeli, math hesaplamalari ile
-  // kalabalik yapma" — collapse the old 4-block render into ONE headline
-  // number, ONE relatable comparison, ONE team-scale callout.
   const out: string[] = [];
-
-  if (usingDynamicPrice && modelId) {
-    out.push(
-      `  $${usdStr(lifetimeUsd)} of ${modelId} tokens your team didn't burn.`,
-    );
-  } else if (usingDynamicPrice) {
-    out.push(
-      `  $${usdStr(lifetimeUsd)} of tokens your team didn't burn.`,
-    );
-  } else {
-    out.push(
-      `  $${usdStr(lifetimeUsd)} of Opus 4.7 tokens your team didn't burn.`,
-    );
-  }
-
   out.push(
-    `  context-mode kept ${kb(lifetimeBytes)} out of context — that's ${cursorMonths} months of Cursor Pro paid for itself.`,
+    `  ${kb(lifetimeBytes)} kept out of context, lifetime — ~${fmtNum(lifetimeTokens)} tokens est. your team didn't re-read.`,
   );
-  if (teamUsd > 0 && teamYearUsd > 0) {
-    out.push("");
-    out.push(
-      `  Scale across a 10-dev team and that's ~$${teamYearUsd.toLocaleString("en-US")}/year saved.`,
-    );
-  }
-
-  if (!usingDynamicPrice) {
-    out.push("");
-    out.push(
-      `  (Opus rates shown for context. On cheaper models the dollar number drops; the savings ratio holds.)`,
-    );
-  }
+  out.push(
+    `  (Bytes are measured; the token figure is an estimate, see CHARS_PER_TOKEN. No dollar figure -- that was a guess priced at a hardcoded rate.)`,
+  );
   return out;
 }
 
@@ -2186,13 +2122,13 @@ function renderNarrative5Section(args: {
 
   // ── Token math (same monotonic-growth invariant as the legacy branch).
   const convEventsTokens = conversation.events * TOKENS_PER_EVENT;
-  const convRescueTokens = Math.round((conversation.snapshotBytes ?? 0) / 4);
+  const convRescueTokens = estimateTokens(conversation.snapshotBytes ?? 0);
   const convLegacyTokens = convEventsTokens + convRescueTokens;
   const convRealTokens   = realBytes?.conversation?.totalSavedTokens ?? 0;
   const conversationTokens = Math.max(convLegacyTokens, convRealTokens);
 
   const lifetimeEventsTokens = (lifetime?.totalEvents ?? 0) * TOKENS_PER_EVENT;
-  const lifetimeRescueTokens = Math.round((lifetime?.rescueBytes ?? 0) / 4);
+  const lifetimeRescueTokens = estimateTokens(lifetime?.rescueBytes ?? 0);
   const lifetimeLegacyTokens = lifetimeEventsTokens + lifetimeRescueTokens;
   // Lifetime "with"/"without" — measured when available, else legacy fallback.
   // Honest definition (matches conversation bar below):
@@ -2205,10 +2141,10 @@ function renderNarrative5Section(args: {
   const lifeAv  = realBytes?.lifetime?.bytesAvoided  ?? 0;
   const hasMeasured = (lifeRet + lifeAv) > 0;
   const lifetimeTokensWithout = hasMeasured
-    ? Math.max(1, Math.floor((lifeRet + lifeAv) / 4))
+    ? Math.max(1, estimateTokens(lifeRet + lifeAv))
     : lifetimeLegacyTokens;
   const lifetimeTokensWith = hasMeasured
-    ? Math.max(1, Math.floor(lifeRet / 4))
+    ? Math.max(1, estimateTokens(lifeRet))
     : Math.max(1, Math.round(lifetimeTokensWithout * 0.02));
 
   // Bytes from realBytes when present, else derive from tokens (×4 — same
@@ -2217,9 +2153,14 @@ function renderNarrative5Section(args: {
   const lifetimeBytes = (multiAdapter?.totalBytes && multiAdapter.totalBytes > 0)
     ? multiAdapter.totalBytes
     : lifetimeTokensWithout * 4;
-  const convBytes = realBytes?.conversation
+  const convBytesRaw = realBytes?.conversation
     ? (realBytes.conversation.eventDataBytes + realBytes.conversation.bytesAvoided + realBytes.conversation.snapshotBytes)
     : conversationTokens * 4;
+  // #950: per-chat is a subset of the lifetime aggregate — it must never be
+  // reported larger than the all-projects total. Only clamp when the
+  // lifetime figure is itself known (>0); a fresh disk aggregate reporting 0
+  // must not zero out a real per-chat number.
+  const convBytes = lifetimeBytes > 0 ? Math.min(convBytesRaw, lifetimeBytes) : convBytesRaw;
 
   // ── Days alive of THE CONVERSATION (section 1).
   const convDays = conversation.daysAlive >= 1
@@ -2323,15 +2264,17 @@ function renderNarrative5Section(args: {
   } else {
     const convBytesWithout  = measuredAvoided + measuredReturned;
     const convBytesWith     = Math.max(1, measuredReturned);
-    const convTokensWithout = Math.max(1, Math.floor(convBytesWithout / 4));
-    const convTokensWith    = Math.max(1, Math.floor(convBytesWith    / 4));
+    const convTokensWithout = Math.max(1, estimateTokens(convBytesWithout));
+    const convTokensWith    = Math.max(1, estimateTokens(convBytesWith));
     const withoutBar = dataBar(convTokensWithout, convTokensWithout, 32);
     const withBar    = dataBar(convTokensWith,    convTokensWithout, 32);
-    const convPct    = (1 - convTokensWith / convTokensWithout) * 100;
+    const convPct    = clampPct((1 - convTokensWith / convTokensWithout) * 100);
     const convMult   = Math.max(1, Math.round(convTokensWithout / convTokensWith));
     out.push(`  Without context-mode  ${kb(convBytesWithout).padStart(8)}  ${withoutBar}   ${fmtNum(convTokensWithout).padStart(7)} tokens`);
     out.push(`  With context-mode     ${kb(convBytesWith).padStart(8)}  ${withBar}   ${fmtNum(convTokensWith).padStart(7)} tokens`);
-    out.push(`                          ${convPct.toFixed(1)}% kept out of context · your AI ran ${convMult}× longer before /compact fired`);
+    // #1023: this is a byte ratio (window usage without vs with), not a time
+    // measurement — do not phrase it as "ran longer".
+    out.push(`                          ${convPct.toFixed(1)}% kept out of context · window usage cut ${convMult}x`);
     out.push("");
   }
 
@@ -2420,7 +2363,7 @@ function renderNarrative5Section(args: {
 
   // ── Footer.
   out.push("  Your AI talks less, remembers more, costs less.");
-  out.push(`  Locale ${locale} · timezone ${tz} · pricing examples for illustration only.`);
+  out.push(`  Locale ${locale} · timezone ${tz} · token figures are estimates, not measurements.`);
   out.push("");
   const versionStr = version ? `v${version}` : "context-mode";
   out.push(`  ${versionStr}`);
@@ -2594,54 +2537,11 @@ function fmtNum(n: number): string {
   return String(n);
 }
 
-// ─────────────────────────────────────────────────────────
-// Pricing (Bug #6) — Anthropic Opus input rate
-// ─────────────────────────────────────────────────────────
-
-// ── Pricing (Bug #6) — per-token USD rate ─────────────────
-// Reads PI_CONTEXT_MODE_PRICE_OUTPUT_PER_TOKEN when set by a Pi host;
-// falls back to the Opus 4.7/4.8 input rate ($5/1M) for all other adapters.
-// Verified against platform.claude.com/docs/en/about-claude/pricing 2026-06.
-//
-// IMPORTANT: this is a FUNCTION, not a const. Pi sets the env var
-// AFTER the MCP server has been imported (the bridge spawns the server
-// child, then the child reads its own env on every render). A
-// module-load-time const would freeze to the fallback because
-// process.env.PI_CONTEXT_MODE_PRICE_OUTPUT_PER_TOKEN is unset at
-// import time. Resolving on every call keeps the dynamic-pricing
-// contract honest — the env var works without an MCP restart.
-// (Reverted module-load const semantics, PR #741 follow-up.)
-
-/**
- * Per-token USD rate — resolves on every call.
- * Dynamic when PI_CONTEXT_MODE_PRICE_OUTPUT_PER_TOKEN is set, Opus 4.7/4.8 input
- * ($5 per 1M tokens) otherwise.
- */
-export function pricePerToken(): number {
-  const env = process.env.PI_CONTEXT_MODE_PRICE_OUTPUT_PER_TOKEN;
-  if (env !== undefined && env !== "") {
-    const parsed = Number(env);
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  }
-  return 5 / 1_000_000; // Opus 4.7/4.8 input fallback
-}
-
-/**
- * Back-compat alias for the original Opus-rate const (PR #401 architect
- * P1.1 — single source of truth). Kept as a literal so any third-party
- * consumer importing the named constant still resolves to the same
- * fallback rate. New code should call pricePerToken() to pick up the
- * dynamic Pi env override.
- *
- * @deprecated Use pricePerToken() to honor PI_CONTEXT_MODE_PRICE_OUTPUT_PER_TOKEN.
- */
-export const OPUS_INPUT_PRICE_PER_TOKEN = 5 / 1_000_000;
-
-/** Convert a token count to a USD string at the current per-token rate. */
-export function tokensToUsd(tokens: number): string {
-  const safe = Number.isFinite(tokens) && tokens > 0 ? tokens : 0;
-  return `$${(safe * pricePerToken()).toFixed(2)}`;
-}
+// pricePerToken() / tokensToUsd() / OPUS_INPUT_PRICE_PER_TOKEN were removed
+// (net-savings rework): a dollar figure derived from an unmeasured /4 token
+// guess, priced at a hardcoded per-token rate, was three assumptions deep
+// and got read as fact. Bytes (measured) and estimateTokens() (a labeled
+// estimate, see src/session/token-estimate.ts) are the honest units now.
 
 /**
  * Build a proportional bar using █ chars, scaled to a fixed width.
@@ -2725,7 +2625,7 @@ function renderProjectMemory(
     // Estimate lifetime savings: ~1KB per event → ~256 tokens/event at Opus rates,
     // plus current session's already-tracked token savings (in-memory).
     const lifetimeTokens = lifeEvents * 256 + sessionTokensSaved;
-    out.push(`  ${fmtNum(lifeEvents)} events · ${sessionLabel} · ~${tokensToUsd(lifetimeTokens)} saved lifetime`);
+    out.push(`  ${fmtNum(lifeEvents)} events · ${sessionLabel} · ~${fmtNum(lifetimeTokens)} tokens est. saved lifetime`);
   }
   out.push("");
 
@@ -2793,17 +2693,15 @@ function renderAutoMemory(lifetime: LifetimeStats | undefined): string[] {
 /** Render the closing "Bottom line" footer (Bug #8). */
 function renderBottomLine(sessionTokensSaved: number, lifetime: LifetimeStats | undefined): string[] {
   const out: string[] = [];
-  const sessionUsd = tokensToUsd(sessionTokensSaved);
   // Lifetime = disk-aggregated events × 256 tokens + current session's
   // in-memory token savings. Two pipelines unified at the render edge so
-  // lifetime ≥ session always (never the surprising "$X session · $0 lifetime"
+  // lifetime ≥ session always (never the surprising "X session · 0 lifetime"
   // a fresh user sees pre-flush).
   const lifetimeTokens = (lifetime?.totalEvents ?? 0) * 256 + sessionTokensSaved;
-  const lifetimeUsd = tokensToUsd(lifetimeTokens);
   out.push("");
   out.push("─".repeat(65));
   out.push("Your AI talks less, remembers more, costs less.");
-  out.push(`${sessionUsd} this session  ·  ${lifetimeUsd} lifetime`);
+  out.push(`~${fmtNum(sessionTokensSaved)} tokens est. this session  ·  ~${fmtNum(lifetimeTokens)} tokens est. lifetime`);
   out.push("─".repeat(65));
   return out;
 }
@@ -2857,7 +2755,7 @@ function renderConversation(c: ConversationStats, conversationUsd: string, contr
   out.push(`  This conversation contributed ${conversationUsd}  ·  ${pctStr}`);
   out.push(`  ${c.events.toLocaleString("en-US")} events  ·  ${daysStr} alive`);
   if (c.snapshotsConsumed > 0 && c.snapshotBytes > 0) {
-    const rescuedTokens = Math.round(c.snapshotBytes / 4);
+    const rescuedTokens = estimateTokens(c.snapshotBytes);
     out.push(`  ${c.snapshotsConsumed} compact weathered  ·  ${fmtNum(rescuedTokens)} tokens rescued from a ${(c.snapshotBytes / 1024).toFixed(0)} KB snapshot`);
   }
   out.push("");
@@ -3071,8 +2969,8 @@ export function formatReport(
   const totalReturned = report.savings.total_bytes_returned;
   const totalCalls = report.savings.total_calls;
   const grandTotal = totalKeptOut + totalReturned;
-  const savingsPct = grandTotal > 0 ? (totalKeptOut / grandTotal) * 100 : 0;
-  const tokensSaved = Math.round(totalKeptOut / 4);
+  const savingsPct = grandTotal > 0 ? clampPct((totalKeptOut / grandTotal) * 100) : 0;
+  const tokensSaved = estimateTokens(totalKeptOut);
   const ratioMultiplier = totalReturned > 0
     ? Math.max(1, Math.round(grandTotal / Math.max(totalReturned, 1)))
     : 0;
@@ -3106,10 +3004,12 @@ export function formatReport(
 
   // ── Active session: visual savings dashboard ──
 
-  // Line 1: Hero metric — the screenshottable number
-  // Bug #6: include Opus pricing on the hero line for credibility.
+  // Line 1: Hero metric — the screenshottable number. Bytes are the
+  // measured ground truth; tokensSaved is a labeled estimate (see
+  // src/session/token-estimate.ts). No dollar figure -- that was an
+  // estimate priced at a hardcoded fallback rate, three assumptions deep.
   lines.push(
-    `${fmtNum(tokensSaved)} tokens saved  ·  ${savingsPct.toFixed(1)}% reduction  ·  ${duration}  ·  ~${tokensToUsd(tokensSaved)} saved (Opus)`,
+    `${kb(totalKeptOut)} kept out  ·  ~${fmtNum(tokensSaved)} tokens est.  ·  ${savingsPct.toFixed(1)}% reduction  ·  ${duration}`,
   );
   lines.push("");
 

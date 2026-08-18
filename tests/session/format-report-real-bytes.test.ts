@@ -2,12 +2,15 @@
  * format-report-real-bytes — Phase 8.2-8.4 of D2 PRD
  *
  * Verifies the renderer takes the new `realBytes` opt and uses it to
- * compute conversation + lifetime $ instead of the conservative
- * `events × 256` token estimate.
+ * compute conversation + lifetime KEPT TOKENS instead of the conservative
+ * `events × 256` token estimate. Net-savings rework dropped the dollar
+ * conversion that used to sit on top of this (a /4 guess priced at a
+ * hardcoded rate) -- the section-4 line now reports bytes + a labeled
+ * token estimate, no $.
  *
- * Backward-compat: when `opts.realBytes` is omitted, the math is
+ * Backward-compat: when `opts.realBytes` is omitted, the token math is
  * IDENTICAL to the prior version (the Cycle 4 conversation-layout
- * test in stats-output-format.test.ts pins the old $69.X output).
+ * test in stats-output-format.test.ts pins the old token-estimate output).
  */
 
 import { describe, expect, test } from "vitest";
@@ -73,15 +76,18 @@ function baseLifetime(): LifetimeStats {
 }
 
 /**
- * Helper: extract the lifetime $ from the section-4 cost line so the
- * assertion can compare numerically instead of regex-matching every
- * variant of the formatted dollar figure. Updated for the 5-section
- * narrative renderer (section 4 — "For example: what would that cost?").
+ * Helper: extract the lifetime kept-token estimate from the section-4
+ * line so the assertion can compare numerically instead of regex-matching
+ * every variant of the formatted figure. Section 4 — "The bottom line" —
+ * reports bytes + a labeled token estimate, no dollar figure.
  */
-function extractLifetimeUsd(text: string): number {
-  const m = text.match(/\$(\d+(?:\.\d+)?) of Opus 4.7 tokens/);
-  if (!m) throw new Error(`section-4 Opus line not found in:\n${text}`);
-  return parseFloat(m[1]);
+function extractLifetimeKeptTokens(text: string): number {
+  const m = text.match(/~([\d.]+)([KM]?) tokens est\. your team didn't re-read/);
+  if (!m) throw new Error(`section-4 kept-tokens line not found in:\n${text}`);
+  const n = parseFloat(m[1]);
+  if (m[2] === "M") return n * 1_000_000;
+  if (m[2] === "K") return n * 1_000;
+  return n;
 }
 
 /**
@@ -98,18 +104,19 @@ const STABLE_OPTS = {
 };
 
 describe("formatReport — Phase 8 realBytes opt", () => {
-  test("8.4 backward compat: omitting realBytes still emits the legacy ~$69 math via Opus alone", () => {
+  test("8.4 backward compat: omitting realBytes still emits the legacy events×256 token estimate", () => {
     const text = formatReport(baseReport(), "1.0.111", null, {
       conversation: baseConversation(),
       lifetime: baseLifetime(),
       ...STABLE_OPTS,
     });
-    // Conservative estimate: 16,366 lifetime events × 256 / 4 + rescue = ~$69
-    // The narrative renderer surfaces this via section 4's Opus-4 line.
-    expect(text).toMatch(/\$\d+\.\d+ of Opus 4.7 tokens/);
+    // Conservative estimate: 16,366 lifetime events × 256 ≈ 4.2M tokens.
+    // The narrative renderer surfaces this via section 4's bottom-line.
+    expect(text).toMatch(/~[\d.]+M tokens est\. your team didn't re-read/);
+    expect(text).not.toMatch(/\$/);
   });
 
-  test("8.2 realBytes measurement is authoritative for the lifetime $", () => {
+  test("8.2 realBytes measurement is authoritative for the lifetime kept-token estimate", () => {
     // Honest-savings fix: measured redirects REPLACE the events×256
     // heuristic instead of Math.max-ing with it — capture volume
     // (eventDataBytes, snapshotBytes) is not savings.
@@ -127,15 +134,14 @@ describe("formatReport — Phase 8 realBytes opt", () => {
       realBytes: { lifetime: realBytes },
       ...STABLE_OPTS,
     });
-    const usd = extractLifetimeUsd(text);
+    const keptTokens = extractLifetimeKeptTokens(text);
     // kept tokens = (avoided + returned)/4 − returned/4 = 30M exactly —
     // derived ONLY from measured redirects (eventData/snapshot excluded).
-    // At the suite's $5/1M rate that is exactly $150.00; the legacy
-    // events×256 heuristic would have produced ~$23.
-    expect(usd).toBeCloseTo(150.0, 1);
+    // The legacy events×256 heuristic would have produced ~4.2M instead.
+    expect(keptTokens).toBeCloseTo(30_000_000, -5);
   });
 
-  test("8.2 realBytes also drives the conversation contribution $", () => {
+  test("8.2 realBytes also drives the conversation contribution token estimate", () => {
     const lifetimeRealBytes: RealBytesStats = {
       eventDataBytes: 80_000_000,
       bytesAvoided:  120_000_000,
