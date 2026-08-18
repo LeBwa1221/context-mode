@@ -721,10 +721,10 @@ function getStore(): ContentStore {
     // Server just opens whatever DB exists (or creates new if hook deleted it).
     const dbPath = getStorePath();
     _store = new ContentStore(dbPath);
-    // #985: keep the shared content-store WAL bounded even on a hard exit
-    // that never reaches close()'s TRUNCATE checkpoint. PASSIVE never
-    // blocks and adds no locking (ADR-0001-safe). Default 60s;
-    // CONTEXT_MODE_WAL_CHECKPOINT_MS tunes it, 0 disables.
+    // #985: keep the shared content-store WAL bounded — close() no longer
+    // checkpoints either (#1056), so PASSIVE here is the only WAL-bounding
+    // path. PASSIVE never blocks and adds no locking (ADR-0001-safe).
+    // Default 60s; CONTEXT_MODE_WAL_CHECKPOINT_MS tunes it, 0 disables.
     {
       const raw = process.env.CONTEXT_MODE_WAL_CHECKPOINT_MS;
       _store.startCheckpointTimer(raw === undefined ? 60000 : Number(raw));

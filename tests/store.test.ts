@@ -5,7 +5,7 @@
  * using real fixtures from Context7 and MCP tools.
  */
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { strict as assert } from "node:assert";
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -1727,6 +1727,30 @@ describe("closeDB — WAL checkpoint", () => {
       try { unlinkSync(dbPath + s); } catch {}
     }
   });
+
+  test("closeDB issues no manual wal_checkpoint pragma — sibling connections are never mutated", () => {
+    const pragmas: string[] = [];
+    const closes: number[] = [];
+    const fakeDb = {
+      pragma(q: string) { pragmas.push(q); },
+      close() { closes.push(1); },
+    } as unknown as import("better-sqlite3").Database;
+    closeDB(fakeDb);
+    // Pre-#1056 behavior ran `wal_checkpoint(TRUNCATE)` here, which
+    // truncated the shared WAL and reset the wal-index under sibling
+    // server processes' live connections. closeDB must only close.
+    expect(pragmas.length).toBe(0);
+    expect(closes.length).toBe(1);
+  });
+
+  test("closeDB swallows close() errors", () => {
+    const fakeDb = {
+      pragma() { throw new Error("should not be called"); },
+      close() { throw new Error("close failed"); },
+    } as unknown as import("better-sqlite3").Database;
+    // Must not throw — closeDB is called from finally/cleanup paths.
+    expect(() => closeDB(fakeDb)).not.toThrow();
+  });
 });
 
 // ── Corrupt DB recovery (#244) ──
@@ -1760,7 +1784,48 @@ describe("ContentStore — corrupt DB recovery", () => {
 // ═══════════════════════════════════════════════════════════
 
 describe("mmap_size pragma", () => {
-  test("mmap_size is set on new ContentStore", () => {
+  const ENV_KEY = "CONTEXT_MODE_MMAP_SIZE";
+  let savedEnv: string | undefined;
+
+  beforeEach(() => {
+    savedEnv = process.env[ENV_KEY];
+    delete process.env[ENV_KEY];
+  });
+
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env[ENV_KEY];
+    else process.env[ENV_KEY] = savedEnv;
+  });
+
+  function recordingDb(): { db: import("better-sqlite3").Database; pragmas: string[] } {
+    const pragmas: string[] = [];
+    const db = { pragma(q: string) { pragmas.push(q); } } as unknown as import("better-sqlite3").Database;
+    return { db, pragmas };
+  }
+
+  test("mmap_size is NOT applied by default — multi-process safety (global store)", () => {
+    const { db, pragmas } = recordingDb();
+    applyWALPragmas(db);
+    expect(pragmas).toContain("journal_mode = WAL");
+    expect(pragmas).toContain("synchronous = NORMAL");
+    expect(pragmas.some((q) => q.startsWith("mmap_size"))).toBe(false);
+  });
+
+  test("CONTEXT_MODE_MMAP_SIZE opts back in", () => {
+    process.env[ENV_KEY] = "1048576";
+    const { db, pragmas } = recordingDb();
+    applyWALPragmas(db);
+    expect(pragmas).toContain("mmap_size = 1048576");
+  });
+
+  test("invalid CONTEXT_MODE_MMAP_SIZE is ignored without throwing", () => {
+    process.env[ENV_KEY] = "not-a-number";
+    const { db, pragmas } = recordingDb();
+    expect(() => applyWALPragmas(db)).not.toThrow();
+    expect(pragmas.some((q) => q.startsWith("mmap_size"))).toBe(false);
+  });
+
+  test("FTS5 search works with mmap disabled", () => {
     const dbPath = join(tmpdir(), `ctx-mmap-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
     const store = new ContentStore(dbPath);
     store.indexPlainText("Memory-mapped I/O test content for FTS5 search", "mmap-test");

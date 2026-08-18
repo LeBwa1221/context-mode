@@ -1853,7 +1853,8 @@ export class ContentStore {
   /**
    * Begin opportunistic PASSIVE WAL checkpoints (#985). The server calls
    * this for the shared content store so the WAL stays bounded even when
-   * the process is killed before close() can run its TRUNCATE checkpoint.
+   * the process is killed hard, since closeDB() no longer checkpoints on
+   * graceful close either (#1056 — see closeDB's doc comment).
    * Idempotent — a second call replaces the prior timer. Stopped by
    * close()/cleanup().
    */
@@ -1863,10 +1864,12 @@ export class ContentStore {
   }
 
   close(): void {
+    // Stop the PASSIVE timer before closeDB() so the two never checkpoint
+    // concurrently (closeDB itself no longer checkpoints — #1056).
     this.#checkpointStop?.();
     this.#checkpointStop = null;
     this.#optimizeFTS(); // defragment before close
-    closeDB(this.#db); // WAL checkpoint before close — important for persistent DBs
+    closeDB(this.#db);
   }
 
   // ── Vocabulary Extraction ──
