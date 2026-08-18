@@ -855,13 +855,19 @@ describe("Pi Extension", () => {
         // darwin/win32, worktree-suffixed when applicable). Mirror
         // the production resolver here so this test reads from the
         // exact path the extension just wrote to.
+        //
+        // sessionsDir must come from the same PiAdapter.getSessionDir()
+        // the extension itself uses. maint/global-store (#feat(storage):
+        // make context-mode data root global by default) moved the
+        // default off the old `~/.pi/context-mode/sessions` layout onto
+        // `resolveContextModeDataRoot()/context-mode/sessions` (a shared,
+        // profile-independent app-data root). Hardcoding the old
+        // `join(HOME, ".pi", "context-mode", "sessions")` formula here
+        // silently diverged from that, pointing this test at a directory
+        // the extension never created.
         const { resolveSessionDbPath } = await import("../src/session/db.js");
-        const sessionsDir = join(
-          process.env.HOME!,
-          ".pi",
-          "context-mode",
-          "sessions",
-        );
+        const { PiAdapter } = await import("../src/adapters/pi/index.js");
+        const sessionsDir = new PiAdapter().getSessionDir();
         const dbPath = resolveSessionDbPath({
           projectDir: process.env.PI_PROJECT_DIR!,
           sessionsDir,
