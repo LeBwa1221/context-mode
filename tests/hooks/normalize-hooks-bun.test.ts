@@ -88,6 +88,59 @@ describe("normalizeHooksOnStartup — bun-aware rewrite (#738)", () => {
   });
 });
 
+describe("normalizeHooksOnStartup — source-checkout guard", () => {
+  let pluginRoot: string;
+  let hooksPath: string;
+  let pluginJsonPath: string;
+
+  beforeEach(() => {
+    pluginRoot = mkdtempSync(join(tmpdir(), "ctx-norm-srcguard-"));
+    mkdirSync(join(pluginRoot, "hooks"), { recursive: true });
+    mkdirSync(join(pluginRoot, ".claude-plugin"), { recursive: true });
+    hooksPath = join(pluginRoot, "hooks", "hooks.json");
+    pluginJsonPath = join(pluginRoot, ".claude-plugin", "plugin.json");
+    const hooksBody = JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          { matcher: "Bash", hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/pretooluse.mjs"' }] },
+        ],
+      },
+    });
+    writeFileSync(hooksPath, hooksBody);
+    writeFileSync(
+      pluginJsonPath,
+      JSON.stringify({ mcpServers: { "context-mode": { command: "node", args: ["${CLAUDE_PLUGIN_ROOT}/start.mjs"] } } }),
+    );
+  });
+
+  afterEach(() => {
+    try { rmSync(pluginRoot, { recursive: true, force: true }); } catch {}
+  });
+
+  test("skips rewrite when pluginRoot is a git working tree (.git dir)", async () => {
+    mkdirSync(join(pluginRoot, ".git"), { recursive: true });
+    const { normalizeHooksOnStartup } = await import("../../hooks/normalize-hooks.mjs");
+    normalizeHooksOnStartup({ pluginRoot, nodePath: "/usr/local/bin/node", platform: "linux" });
+    expect(readFileSync(hooksPath, "utf-8")).toContain("${CLAUDE_PLUGIN_ROOT}");
+    expect(readFileSync(pluginJsonPath, "utf-8")).toContain("${CLAUDE_PLUGIN_ROOT}");
+  });
+
+  test("skips rewrite when .git is a file (worktree)", async () => {
+    writeFileSync(join(pluginRoot, ".git"), "gitdir: /some/other/repo/.git/worktrees/x\n");
+    const { normalizeHooksOnStartup } = await import("../../hooks/normalize-hooks.mjs");
+    normalizeHooksOnStartup({ pluginRoot, nodePath: "/usr/local/bin/node", platform: "linux" });
+    expect(readFileSync(hooksPath, "utf-8")).toContain("${CLAUDE_PLUGIN_ROOT}");
+    expect(readFileSync(pluginJsonPath, "utf-8")).toContain("${CLAUDE_PLUGIN_ROOT}");
+  });
+
+  test("still rewrites a cache-shaped install path with no .git", async () => {
+    const { normalizeHooksOnStartup } = await import("../../hooks/normalize-hooks.mjs");
+    normalizeHooksOnStartup({ pluginRoot, nodePath: "/usr/local/bin/node", platform: "linux" });
+    expect(readFileSync(hooksPath, "utf-8")).not.toContain("${CLAUDE_PLUGIN_ROOT}");
+    expect(readFileSync(pluginJsonPath, "utf-8")).not.toContain("${CLAUDE_PLUGIN_ROOT}");
+  });
+});
+
 describe("normalizeHooksJson — bun rewrite content-level (#738)", () => {
   test("rewrites node prefix to provided jsRuntimePath", async () => {
     const { normalizeHooksJson } = await import("../../hooks/normalize-hooks.mjs");

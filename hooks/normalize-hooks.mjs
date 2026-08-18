@@ -14,7 +14,7 @@
 // Survives upgrades because it runs at every start.
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
 
 const PLACEHOLDER = "${CLAUDE_PLUGIN_ROOT}";
 
@@ -78,6 +78,25 @@ function hasStaleCacheVersionSegment(content, currentVersion) {
  * `pluginRoot` is optional for backwards compatibility with single-arg
  * callers; without it, only the placeholder check runs.
  */
+/**
+ * Is `pluginRoot` a git working tree rather than a Claude Code cache/install
+ * dir? Mirrors heal-partial-install.mjs's deriveMarketplaceClonePath guard
+ * shape: refuse to touch paths that don't look like a managed install.
+ *
+ * Rewriting a source checkout's checked-in manifests substitutes
+ * machine-specific absolute paths for the `${CLAUDE_PLUGIN_ROOT}` placeholder
+ * that must stay in version control. `.git` is a directory in a normal clone
+ * but a FILE in a worktree, so this checks existence, not directory-ness.
+ */
+export function isSourceCheckout(pluginRoot) {
+  if (!pluginRoot) return false;
+  try {
+    return existsSync(join(pluginRoot, ".git"));
+  } catch {
+    return false;
+  }
+}
+
 export function needsHookNormalization(content, pluginRoot) {
   if (!content || typeof content !== "string") return false;
   if (content.includes(PLACEHOLDER)) return true;
@@ -261,6 +280,10 @@ export function normalizeHooksJsonOnly({ pluginRoot, nodePath, jsRuntimePath, pl
   const hasBunSwap = jsRuntimePath && jsRuntimePath !== nodePath;
   if (isPlatformGated && !hasBunSwap) return;
   if (!pluginRoot || !effectiveRuntime) return;
+  if (isSourceCheckout(pluginRoot)) {
+    console.error(`[normalize-hooks] skipped: source checkout at ${pluginRoot}`);
+    return;
+  }
 
   try {
     const hooksPath = resolve(pluginRoot, "hooks", "hooks.json");
@@ -304,6 +327,7 @@ export function normalizeHooksOnStartup({ pluginRoot, nodePath, jsRuntimePath, p
   // exclusively by the hooks.json branch above.
   if (platform !== "win32" && platform !== "linux") return;
   if (!pluginRoot || !nodePath) return;
+  if (isSourceCheckout(pluginRoot)) return; // already logged by normalizeHooksJsonOnly above
 
   // .claude-plugin/plugin.json
   try {
