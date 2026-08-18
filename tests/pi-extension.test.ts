@@ -1540,8 +1540,13 @@ describe("Pi MCP bridge (#426)", () => {
 
       try {
         client.start();
-        // Give the child time to write its diag line and exit.
-        await new Promise((r) => setTimeout(r, 300));
+        // Wait deterministically for the diag line rather than a fixed
+        // sleep: on Windows the child's immediate process.exit(1) races the
+        // stderr pipe flush, so a fixed ~300ms sleep failed 8/10 runs.
+        const deadline = Date.now() + 5_000;
+        while (!logged.some((l) => l.includes("FAKE_MCP_CRASH_DIAG")) && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 25));
+        }
       } finally {
         // @ts-expect-error restore
         process.stderr.write = origWrite;
