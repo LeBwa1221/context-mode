@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 
 import { loadDatabase } from "../../src/db-base.js";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 import { resetGuidanceThrottle } from "../../hooks/core/routing.mjs";
 
 
@@ -77,7 +78,10 @@ describe("WebFetch advisory does not emit a redirect/webfetch-redirected marker"
     // must apply the same normalization before SHA — otherwise on Windows the
     // expected hash uses backslashes while the hook uses slashes (#435 pattern).
     const projectHash = _hashCanonical(fakeProject.replace(/\\/g, "/"));
-    const dbDir = join(fakeHome, ".claude", "context-mode", "sessions");
+    // maint/integration (HANDOFF.md item 6): Claude Code hook storage now
+    // resolves the shared global root (resolveContextModeDataRoot), not a
+    // ~/.claude-scoped dir.
+    const dbDir = join(resolveContextModeDataRoot(undefined, fakeHome), "context-mode", "sessions");
     mkdirSync(dbDir, { recursive: true });
     dbPath = join(dbDir, `${projectHash}.db`);
   });

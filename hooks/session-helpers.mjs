@@ -403,7 +403,7 @@ function _resolveProjectFile(opts, projectDirOverride, ext) {
 /**
  * Return the per-project session DB path.
  * Creates the directory if it doesn't exist.
- * Path: ~/<configDir>/context-mode/sessions/<canonicalHash><suffix>.db
+ * Path: <global context-mode data root>/context-mode/sessions/<canonicalHash><suffix>.db
  */
 export function getSessionDBPath(opts = CLAUDE_OPTS, projectDirOverride) {
   return _resolveProjectFile(opts, projectDirOverride, ".db");
@@ -412,7 +412,7 @@ export function getSessionDBPath(opts = CLAUDE_OPTS, projectDirOverride) {
 /**
  * Return the per-project session events file path.
  * Used by sessionstart hook (write) and MCP server (read + auto-index).
- * Path: ~/<configDir>/context-mode/sessions/<canonicalHash><suffix>-events.md
+ * Path: <global context-mode data root>/context-mode/sessions/<canonicalHash><suffix>-events.md
  */
 export function getSessionEventsPath(opts = CLAUDE_OPTS, projectDirOverride) {
   return _resolveProjectFile(opts, projectDirOverride, "-events.md");
@@ -421,7 +421,7 @@ export function getSessionEventsPath(opts = CLAUDE_OPTS, projectDirOverride) {
 /**
  * Return the per-project cleanup flag path.
  * Used to detect true fresh starts vs --continue (which fires startup+resume).
- * Path: ~/<configDir>/context-mode/sessions/<canonicalHash><suffix>.cleanup
+ * Path: <global context-mode data root>/context-mode/sessions/<canonicalHash><suffix>.cleanup
  */
 export function getCleanupFlagPath(opts = CLAUDE_OPTS, projectDirOverride) {
   return _resolveProjectFile(opts, projectDirOverride, ".cleanup");

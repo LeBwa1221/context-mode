@@ -35,7 +35,9 @@ import { adoptLargestLegacyDb } from "../../src/db-base.js";
 import {
   hashProjectDirCanonical,
   resolveContentStorePath,
+  resolveDefaultSessionDir,
   resolveSessionDbPath,
+  resolveSessionStorageDir,
   SessionDB,
 } from "../../src/session/db.js";
 
@@ -120,6 +122,44 @@ describe("one project resolves to ONE db regardless of CLAUDE_CONFIG_DIR", () =>
     });
 
     expect(new Set(paths).size).toBe(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────
+// 2b. Hooks path == adapter path (HANDOFF.md item 6 / maint/integration)
+//
+// The tests above only cover the adapter half (ClaudeCodeAdapter.getSessionDir,
+// which already routed through resolveContextModeDataRoot). Hooks reach
+// storage through a different call chain -
+// resolveSessionStorageDir(() => resolveDefaultSessionDir(...)), as
+// hooks/session-helpers.mjs's resolveSessionDir does - and resolveDefaultSessionDir
+// used to build a profile-scoped path from configDir/CLAUDE_CONFIG_DIR
+// instead of the shared global root. That gap is why the divergence in
+// HANDOFF.md item 6 survived a suite written to prevent exactly it.
+// ─────────────────────────────────────────────────────────
+
+describe("hooks path resolves to the same directory as the adapter path", () => {
+  it("resolveDefaultSessionDir (hooks) matches ClaudeCodeAdapter.getSessionDir() (server)", () => {
+    delete process.env.CLAUDE_CONFIG_DIR;
+
+    const adapterDir = new ClaudeCodeAdapter().getSessionDir();
+    const hooksDir = resolveSessionStorageDir(() =>
+      resolveDefaultSessionDir({ configDir: ".claude", configDirEnv: "CLAUDE_CONFIG_DIR" }),
+    ).path;
+
+    expect(hooksDir).toBe(adapterDir);
+  });
+
+  it("stays identical across simulated profile switches, matching the adapter path", () => {
+    const adapterDir = new ClaudeCodeAdapter().getSessionDir();
+
+    for (const profile of [".claude-ime", ".claude-devcom", ".claude-personal"]) {
+      process.env.CLAUDE_CONFIG_DIR = join(fakeHome, profile);
+      const hooksDir = resolveSessionStorageDir(() =>
+        resolveDefaultSessionDir({ configDir: ".claude", configDirEnv: "CLAUDE_CONFIG_DIR" }),
+      ).path;
+      expect(hooksDir).toBe(adapterDir);
+    }
   });
 });
 

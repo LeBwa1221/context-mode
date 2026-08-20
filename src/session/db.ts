@@ -10,6 +10,7 @@ import { SQLiteBase, defaultDBPath, adoptLargestLegacyDb, startWalCheckpointTime
 import type { PreparedStatement } from "../db-base.js";
 import type { SessionEvent } from "../types.js";
 import type { ProjectAttribution } from "./project-attribution.js";
+import { resolveContextModeDataRoot } from "./data-root.js";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { accessSync, constants, existsSync, mkdirSync, realpathSync, renameSync } from "node:fs";
@@ -90,6 +91,26 @@ export function resolveDefaultSessionDir(opts: DefaultSessionDirOptions): string
   if (legacy && legacyEnvVar) {
     opts.onLegacySessionDir?.(legacyEnvVar, legacy);
     return legacy;
+  }
+
+  // maint/integration (HANDOFF.md item 6): Claude Code hooks used to land in
+  // a profile-scoped ~/<CLAUDE_CONFIG_DIR|.claude>/context-mode/sessions dir
+  // while ClaudeCodeAdapter.getSessionDir() -- which does NOT override
+  // BaseAdapter's default -- already resolved resolveContextModeDataRoot(),
+  // the shared global root. Resolve the SAME root here so Claude Code hooks
+  // and the MCP server never split state again.
+  //
+  // Scoped to configDirEnv === "CLAUDE_CONFIG_DIR" (the two Claude Code call
+  // sites: hooks/session-helpers.mjs's CLAUDE_OPTS and src/server.ts's
+  // ".claude" fallback) on purpose. Every OTHER platform keeps the historical
+  // configDir-based default below: the adapters that DO override
+  // getSessionDir (codex, opencode, vscode-copilot, copilot-cli, kimi)
+  // intentionally fall back to their own ~/.<platform> dir when no
+  // CONTEXT_MODE_HOME/CONTEXT_MODE_DATA_DIR override is set, and unifying
+  // the remaining platforms (gemini-cli, cursor, kiro, jetbrains-copilot,
+  // qwen-code, antigravity, ...) is out of scope for this fix.
+  if (opts.configDirEnv === "CLAUDE_CONFIG_DIR") {
+    return join(resolveContextModeDataRoot(env), "context-mode", "sessions");
   }
 
   return join(resolveConfigDirForDefaultSession(opts.configDir, opts.configDirEnv, env), "context-mode", "sessions");

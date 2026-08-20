@@ -815,27 +815,42 @@ describe("resolveConfigDir (#289)", () => {
     expect(result.kiro_default).toBe(join(home, ".kiro"));
   });
 
-  test("session DB path uses resolved config dir", async () => {
+  test("session DB path uses the shared global root regardless of CLAUDE_CONFIG_DIR (maint/integration)", async () => {
+    // HANDOFF.md item 6: CLAUDE_CONFIG_DIR used to steer session storage
+    // (hooks landed in a profile-scoped dir the MCP server never read).
+    // CLAUDE_CONFIG_DIR still relocates Claude Code's own settings/config,
+    // but storage now always follows resolveContextModeDataRoot() (here
+    // pinned via CONTEXT_MODE_HOME), matching ClaudeCodeAdapter.getSessionDir().
     const customDir = mkdtempSync(join(tmpdir(), "ctx-config-dir-test-"));
+    const globalRoot = mkdtempSync(join(tmpdir(), "ctx-global-root-test-"));
     try {
       const code = `
         process.env.CLAUDE_CONFIG_DIR = ${JSON.stringify(customDir)};
         process.env.CLAUDE_PROJECT_DIR = "/test/project";
         process.env.CONTEXT_MODE_SESSION_SUFFIX = "";
+        process.env.CONTEXT_MODE_HOME = ${JSON.stringify(globalRoot)};
         const { getSessionDBPath } = await import(${JSON.stringify(pathToFileURL(HELPERS_PATH).href)});
         process.stdout.write(getSessionDBPath());
       `;
       const r = spawnSync("node", ["--input-type=module", "-e", code], {
         encoding: "utf-8",
-        env: { ...process.env, CLAUDE_CONFIG_DIR: customDir, CLAUDE_PROJECT_DIR: "/test/project", CONTEXT_MODE_SESSION_SUFFIX: "" },
+        env: {
+          ...process.env,
+          CLAUDE_CONFIG_DIR: customDir,
+          CLAUDE_PROJECT_DIR: "/test/project",
+          CONTEXT_MODE_SESSION_SUFFIX: "",
+          CONTEXT_MODE_HOME: globalRoot,
+        },
         timeout: 10000,
       });
-      expect(r.stdout).toContain(customDir);
+      expect(r.stdout).toContain(globalRoot);
+      expect(r.stdout).not.toContain(customDir);
       expect(r.stdout).toContain("context-mode");
       expect(r.stdout).toContain("sessions");
       expect(r.stdout).toMatch(/\.db$/);
     } finally {
       rmSync(customDir, { recursive: true, force: true });
+      rmSync(globalRoot, { recursive: true, force: true });
     }
   });
 

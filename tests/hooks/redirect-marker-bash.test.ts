@@ -22,6 +22,7 @@ import { createHash } from "node:crypto";
 
 import { SessionDB } from "../../src/session/db.js";
 import { loadDatabase } from "../../src/db-base.js";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 
 
 const _hashCanonical = (p: string) => createHash("sha256").update(
@@ -82,7 +83,10 @@ describe("D2 Phase 3 — bash-redirected marker pattern", () => {
     // must apply the same normalization before SHA — otherwise on Windows the
     // expected hash uses backslashes while the hook uses slashes (#435 pattern).
     const projectHash = _hashCanonical(fakeProject.replace(/\\/g, "/"));
-    const dbDir = join(fakeHome, ".claude", "context-mode", "sessions");
+    // maint/integration (HANDOFF.md item 6): Claude Code hook storage now
+    // resolves the shared global root (resolveContextModeDataRoot), not a
+    // ~/.claude-scoped dir, so CLAUDE_CONFIG_DIR above no longer affects it.
+    const dbDir = join(resolveContextModeDataRoot(undefined, fakeHome), "context-mode", "sessions");
     mkdirSync(dbDir, { recursive: true });
     dbPath = join(dbDir, `${projectHash}.db`);
   });
