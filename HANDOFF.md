@@ -6,11 +6,16 @@ done). Only still-actionable items remain below.
 
 ## Repo/remote facts needed to resume
 
-- Main working tree: `C:\Projects\context-mode`, on `maint/integration` -
-  this is the main line, all other maint branches are merged into it.
+- Main working tree: `C:\Projects\context-mode`, on `main` - this is now the
+  single long-lived branch. `main` tracks `fork/main`. `maint/integration` was
+  retired (deleted locally and on fork) on 2026-08-20; its history is in `main`.
 - Remotes: `origin` = upstream `mksglu/context-mode`, `fork` =
   `https://github.com/LeBwa1221/context-mode.git`. All branches and tags are pushed
-  to `fork`.
+  to `fork`. `remote.pushDefault` is set to `fork`.
+- Publishing fact: the `dskrypnyk` marketplace (repo
+  `LeBwa1221/dskrypnyk-claude-kit`) resolves `context-mode` from
+  `LeBwa1221/context-mode` with NO ref pinned, so it reads the fork's default
+  branch `main`. Pushing anywhere else does not ship.
 - Worktree folders `context-mode-netsave`, `context-mode-perf`,
   `context-mode-prompt-diet`, `context-mode-upstream-picks`, `_base`, and
   `_verify-base` are being deleted (parallel cleanup) - do not look for them. Their
