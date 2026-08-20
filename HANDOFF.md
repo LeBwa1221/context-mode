@@ -81,6 +81,58 @@ it was fixed as a side effect of anything else done in this history.
 leaking from `tests/core/server.test.ts`. Never tracked, safe to delete, but the
 leak itself is still not fixed.
 
+### 6. Hook vs server store-root divergence - real session data lands in the profile dir
+
+Found 2026-08-20. Not covered by any existing item or upstream issue. Undocumented
+until now.
+
+The fork has two independent store-root resolvers that were never unified:
+
+- MCP server: `resolveContextModeDataRoot()` at `src/adapters/base.ts:104-108`,
+  consumed via `BaseAdapter.getSessionDir()` at `src/adapters/base.ts:136` and
+  `src/server.ts:598`. Resolves to the GLOBAL root (on win32,
+  `%LOCALAPPDATA%\context-mode`). Honors `CONTEXT_MODE_HOME` /
+  `CONTEXT_MODE_DATA_DIR`.
+- Hooks: `resolveDefaultSessionDir()` at `src/session/db.ts:86-96`, reached from
+  `hooks/session-helpers.mjs:382-388` (`resolveSessionDir`) and `:408-419`
+  (`getSessionDBPath`, `getSessionEventsPath`). Resolves PROFILE-SCOPED to
+  `~/<CLAUDE_CONFIG_DIR or .claude>/context-mode/sessions`. Honors a DIFFERENT env
+  var, `CONTEXT_MODE_DIR` (`src/session/db.ts:28`).
+
+Consequence: `hooks/posttooluse.mjs:43`, `hooks/sessionstart.mjs:197`, and
+`hooks/stop.mjs:27` write real `session_events` and `tool_calls` into the
+profile-scoped DB on every session, unconditionally, while `ctx_search` /
+`ctx_stats` read the global store. This is the default code path, not a
+misconfiguration.
+
+Why it looks migrated but is not: `adoptLargestLegacyDb()` (`src/db-base.ts:746`)
+does a ONE-SHOT copy gated by `if (existsSync(newDbPath)) return false;`
+(`src/db-base.ts:755`). Once the global DB exists, adoption never re-runs, and
+hook writes immediately diverge from the copied snapshot again.
+
+How it happened: the global-store commits `3388883`, `8effcef`, `1459833`
+changed `src/` only. `1459833` added the adoption calls but left
+`resolveDefaultSessionDir`'s own root computation untouched. No `hooks/` path
+logic was updated.
+
+Measured divergence on 2026-08-20 (project `cc85b9c1aa263b44`): legacy content DB
+had 1441 chunks vs 606 in the global copy (835 chunks existing only in the
+profile store), while the global copy had rows the legacy one lacked
+(`tool_calls` 44 vs 41, `session_resume` 1 vs 0). Neither side is a superset.
+
+TRAP - do not "fix" this by simply pointing the hooks at the global resolver.
+The global DBs already exist, so `adoptLargestLegacyDb` will not fire, and the
+profile-side data would be silently stranded. A fix needs a real merge, not a
+redirect. The design call is: unify the two resolvers, OR make adoption
+re-runnable and merging. Not yet decided.
+
+Fix sites: `hooks/session-helpers.mjs:382-388` and/or `src/session/db.ts:86-96`.
+
+Also confirmed while investigating: the `stats-pid-<N>.json` files in
+`~/.claude-personal` and `~/.claude-observix` are STALE artifacts from a
+pre-`3388883` server build, not active writes. `getStatsFilePath()`
+(`src/server.ts:1064`) now routes through the global root.
+
 ## Standing warning: re-measure, do not trust prior numbers
 
 Every number and every "regression" label recorded in this history's past sessions
