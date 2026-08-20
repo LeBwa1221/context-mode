@@ -91,24 +91,41 @@ leak itself is still not fixed.
 Found 2026-08-20. Not covered by any existing item or upstream issue. Undocumented
 until now.
 
-The fork has two independent store-root resolvers that were never unified:
+CORRECTION (2026-08-20, same day): the paragraph below originally claimed
+`CONTEXT_MODE_DIR` / `STORAGE_ROOT_ENV` was the hook-side override and part of
+the divergence. That was wrong and got copied into
+`docs/plan-store-unification.md` too. `CONTEXT_MODE_DIR` is a SHARED
+storage-override layer (`resolveSessionStorageDir` /
+`resolveContentStorageDir` / `resolveStatsStorageDir` in `src/session/db.ts`)
+composed IDENTICALLY by both hooks (`hooks/session-helpers.mjs:382-388`) and
+the server (`src/server.ts:594-596`) - it was never part of the bug. The real
+divergence was solely `resolveDefaultSessionDir`'s own default branch (no
+override, no legacy env) building a profile-scoped path via
+`resolveConfigDirForDefaultSession(configDir, configDirEnv, env)`, while
+`BaseAdapter.getSessionDir()` used `resolveContextModeDataRoot()`. Fixed at
+commit `4d1272e` (phase 1, Claude Code only - see
+`docs/plan-store-unification.md`).
 
-- MCP server: `resolveContextModeDataRoot()` at `src/adapters/base.ts:104-108`,
-  consumed via `BaseAdapter.getSessionDir()` at `src/adapters/base.ts:136` and
-  `src/server.ts:598`. Resolves to the GLOBAL root (on win32,
-  `%LOCALAPPDATA%\context-mode`). Honors `CONTEXT_MODE_HOME` /
-  `CONTEXT_MODE_DATA_DIR`.
-- Hooks: `resolveDefaultSessionDir()` at `src/session/db.ts:86-96`, reached from
+The fork had two independent store-root resolvers for the Claude Code path
+that were never unified:
+
+- MCP server: `resolveContextModeDataRoot()`, extracted to
+  `src/session/data-root.ts` and re-exported from `src/adapters/base.ts`
+  (the extraction avoids a cycle: `base.ts` already imports
+  `hashProjectDirCanonical` from `src/session/db.ts`). Consumed via
+  `BaseAdapter.getSessionDir()` (`src/adapters/base.ts`) and `src/server.ts`.
+  Resolves to the GLOBAL root (on win32, `%LOCALAPPDATA%\context-mode`).
+  Honors `CONTEXT_MODE_HOME` / `CONTEXT_MODE_DATA_DIR`.
+- Hooks: `resolveDefaultSessionDir()` in `src/session/db.ts`, reached from
   `hooks/session-helpers.mjs:382-388` (`resolveSessionDir`) and `:408-419`
-  (`getSessionDBPath`, `getSessionEventsPath`). Resolves PROFILE-SCOPED to
-  `~/<CLAUDE_CONFIG_DIR or .claude>/context-mode/sessions`. Honors a DIFFERENT env
-  var, `CONTEXT_MODE_DIR` (`src/session/db.ts:28`).
+  (`getSessionDBPath`, `getSessionEventsPath`). Resolved PROFILE-SCOPED to
+  `~/<CLAUDE_CONFIG_DIR or .claude>/context-mode/sessions` for Claude Code.
 
-Consequence: `hooks/posttooluse.mjs:43`, `hooks/sessionstart.mjs:197`, and
-`hooks/stop.mjs:27` write real `session_events` and `tool_calls` into the
-profile-scoped DB on every session, unconditionally, while `ctx_search` /
-`ctx_stats` read the global store. This is the default code path, not a
-misconfiguration.
+Consequence (before the phase 1 fix): `hooks/posttooluse.mjs:43`,
+`hooks/sessionstart.mjs:197`, and `hooks/stop.mjs:27` wrote real
+`session_events` and `tool_calls` into the profile-scoped DB on every Claude
+Code session, unconditionally, while `ctx_search` / `ctx_stats` read the
+global store. This was the default code path, not a misconfiguration.
 
 Why it looks migrated but is not: `adoptLargestLegacyDb()` (`src/db-base.ts:746`)
 does a ONE-SHOT copy gated by `if (existsSync(newDbPath)) return false;`
@@ -125,13 +142,18 @@ had 1441 chunks vs 606 in the global copy (835 chunks existing only in the
 profile store), while the global copy had rows the legacy one lacked
 (`tool_calls` 44 vs 41, `session_resume` 1 vs 0). Neither side is a superset.
 
-TRAP - do not "fix" this by simply pointing the hooks at the global resolver.
-The global DBs already exist, so `adoptLargestLegacyDb` will not fire, and the
-profile-side data would be silently stranded. A fix needs a real merge, not a
-redirect. The design call is: unify the two resolvers, OR make adoption
-re-runnable and merging. Not yet decided.
+TRAP - phase 1 (commit `4d1272e`) unified the resolver ONLY. The global DBs
+already exist, so `adoptLargestLegacyDb` does not fire, and the pre-existing
+profile-side Claude Code data is still stranded there - phase 1 was
+explicitly scoped to stop new writes from diverging further, not to migrate
+what already diverged. Phase 2 (a real merge, not a redirect) is still not
+started. See `docs/plan-store-unification.md`.
 
-Fix sites: `hooks/session-helpers.mjs:382-388` and/or `src/session/db.ts:86-96`.
+Fix sites (phase 1, done): `hooks/session-helpers.mjs:382-388` and
+`src/session/db.ts` (`resolveDefaultSessionDir`), scoped to
+`configDirEnv === "CLAUDE_CONFIG_DIR"` only - every other platform,
+including the five adapters that deliberately override `getSessionDir`
+(codex, opencode, vscode-copilot, copilot-cli, kimi), is unchanged.
 
 Also confirmed while investigating: the `stats-pid-<N>.json` files in
 `~/.claude-personal` and `~/.claude-observix` are STALE artifacts from a
