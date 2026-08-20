@@ -26,7 +26,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
@@ -112,6 +112,31 @@ describe("resolveContextModeDataRoot precedence", () => {
     process.env.CONTEXT_MODE_HOME = "   ";
     const root = resolveContextModeDataRoot();
     expect(root.startsWith(fakeHome)).toBe(true);
+  });
+
+  it("homeOverride wins over XDG_DATA_HOME on the Linux/BSD branch (code review finding 2)", () => {
+    // defaultGlobalDataRoot's win32/darwin branches already honor
+    // homeOverride; the XDG branch used to ignore it and return
+    // resolve(XDG_DATA_HOME) unconditionally, which would leak the real
+    // XDG_DATA_HOME path past a caller-supplied homeOverride (e.g.
+    // enumerateAdapterDirs({home: X}), or any of this suite's own
+    // resolveContextModeDataRoot(undefined, fakeHome) calls, on a real Linux
+    // box with XDG_DATA_HOME set).
+    delete process.env.CONTEXT_MODE_HOME;
+    delete process.env.CONTEXT_MODE_DATA_DIR;
+    const originalPlatform = process.platform;
+    const xdgHome = tempDir("ctx-xdg-real-");
+    const override = tempDir("ctx-xdg-override-");
+    process.env.XDG_DATA_HOME = xdgHome;
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    try {
+      const root = resolveContextModeDataRoot(process.env, override);
+      expect(root).toBe(join(override, ".local", "share"));
+      expect(root).not.toBe(resolve(xdgHome));
+    } finally {
+      Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+      delete process.env.XDG_DATA_HOME;
+    }
   });
 });
 
@@ -293,6 +318,57 @@ describe("adoptLargestLegacyDb", () => {
     const newDbPath = join(newDir, "nomatch.db");
     expect(adoptLargestLegacyDb({ newDbPath, subdir: "content", fileName: "nomatch.db" })).toBe(false);
     expect(existsSync(newDbPath)).toBe(false);
+  });
+
+  // Code review finding 1: the one-level readdirSync(home) scan can never
+  // reach two-level legacy roots. Covers the two adapters named explicitly
+  // in the finding (opencode, jetbrains-copilot); kilo and zed share the
+  // exact same LEGACY_ADAPTER_HOME_SEGMENTS shape and code path.
+  function makeTwoLevelLegacyDb(segments: string[], subdir: string, fileName: string, content: string): string {
+    const dir = join(fakeHome, ...segments, "context-mode", subdir);
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, fileName);
+    writeFileSync(path, content);
+    cleanup.push(join(fakeHome, segments[0]));
+    return path;
+  }
+
+  it("adopts a legacy DB from a two-level root (~/.config/opencode)", () => {
+    const fileName = "opencode-legacy.db";
+    const legacy = makeTwoLevelLegacyDb([".config", "opencode"], "sessions", fileName, "OPENCODE-HISTORY");
+
+    const newDir = tempDir("ctx-global-opencode-");
+    const newDbPath = join(newDir, fileName);
+
+    expect(adoptLargestLegacyDb({ newDbPath, subdir: "sessions", fileName })).toBe(true);
+    expect(readFileSync(newDbPath, "utf-8")).toBe("OPENCODE-HISTORY");
+    expect(existsSync(legacy)).toBe(true); // never deletes old files
+  });
+
+  it("adopts a legacy DB from a two-level root (~/.config/JetBrains)", () => {
+    const fileName = "jetbrains-legacy.db";
+    const legacy = makeTwoLevelLegacyDb([".config", "JetBrains"], "sessions", fileName, "JETBRAINS-HISTORY");
+
+    const newDir = tempDir("ctx-global-jetbrains-");
+    const newDbPath = join(newDir, fileName);
+
+    expect(adoptLargestLegacyDb({ newDbPath, subdir: "sessions", fileName })).toBe(true);
+    expect(readFileSync(newDbPath, "utf-8")).toBe("JETBRAINS-HISTORY");
+    expect(existsSync(legacy)).toBe(true); // never deletes old files
+  });
+
+  it("picks the largest across a one-level AND a two-level legacy root together", () => {
+    const fileName = "mixed-depth.db";
+    const small = makeLegacyDb(".claude-ime", "sessions", fileName, "x".repeat(10));
+    const big = makeTwoLevelLegacyDb([".config", "opencode"], "sessions", fileName, "x".repeat(1000));
+
+    const newDir = tempDir("ctx-global-mixed-depth-");
+    const newDbPath = join(newDir, fileName);
+
+    expect(adoptLargestLegacyDb({ newDbPath, subdir: "sessions", fileName })).toBe(true);
+    expect(readFileSync(newDbPath, "utf-8")).toBe("x".repeat(1000));
+    expect(existsSync(small)).toBe(true);
+    expect(existsSync(big)).toBe(true);
   });
 
   it("resolveContentStorePath adopts a legacy per-profile content DB on first resolve under the global root", () => {

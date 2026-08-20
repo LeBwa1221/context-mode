@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, w
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { KimiAdapter, probeKimiCliVersion } from "../../src/adapters/kimi/index.js";
-import { resolveSessionDbPath, SessionDB } from "../../src/session/db.js";
+import { hashProjectDirCanonical, resolveSessionDbPath, SessionDB } from "../../src/session/db.js";
 import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 
 describe("KimiAdapter", () => {
@@ -466,12 +466,17 @@ command = "context-mode hook kimi posttooluse"
     });
 
     it("resolveSessionDbPath honours getSessionDir", () => {
+      const projectDir = "/tmp/project";
       const dbPath = resolveSessionDbPath({
         sessionsDir: adapter.getSessionDir(),
-        projectDir: "/tmp/project",
+        projectDir,
       });
-      expect(dbPath).toContain("context-mode");
-      expect(dbPath).toContain("sessions");
+      // Exact match (not toContain) - "context-mode"/"sessions" substrings
+      // were also true of the old ~/.kimi-code path, so a substring check
+      // asserts nothing about which root was actually used.
+      expect(dbPath).toBe(
+        join(resolveContextModeDataRoot(), "context-mode", "sessions", `${hashProjectDirCanonical(projectDir)}.db`),
+      );
     });
 
     it("can create and write to a SessionDB in the Kimi session dir", () => {

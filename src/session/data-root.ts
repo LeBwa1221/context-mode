@@ -40,7 +40,9 @@ function defaultGlobalDataRoot(env: NodeJS.ProcessEnv, homeOverride?: string): s
     return join(home, "Library", "Application Support");
   }
   const xdg = env.XDG_DATA_HOME?.trim();
-  return xdg ? resolve(xdg) : join(home, ".local", "share");
+  // homeOverride must win over XDG_DATA_HOME, same as it wins over ambient
+  // homedir() on win32/darwin above - see the homeOverride doc comment.
+  return xdg && !homeOverride ? resolve(xdg) : join(home, ".local", "share");
 }
 
 /**
@@ -88,3 +90,39 @@ export function resolveContextModeDataRootOverride(
   }
   return resolve(trimmed);
 }
+
+/**
+ * Legacy per-adapter `$HOME`-relative segments, from before the global-store
+ * fix (maint/integration) removed every platform's own storage root. Kept as
+ * the single source of truth for "where could an old, not-yet-migrated DB
+ * be" so `adoptLargestLegacyDb` (src/db-base.ts) and `enumerateAdapterDirs`
+ * (src/session/analytics.ts) can't drift apart on the list again.
+ *
+ * Some entries are two levels deep (`.config/opencode`, `.config/JetBrains`,
+ * ...) - `adoptLargestLegacyDb` used to scan only direct dot-directory
+ * children of `homedir()`, which can never reach these. NOT exhaustive:
+ * doesn't cover vscode-copilot's project-relative `.github/context-mode/...`
+ * (no home-relative path exists for it) or any store an adapter's own
+ * config-dir env var (CODEX_HOME, COPILOT_HOME, KIMI_CODE_HOME,
+ * GEMINI_CLI_HOME, ...) relocated outside `$HOME` - both are phase 2 work
+ * (see docs/plan-store-unification.md).
+ */
+export const LEGACY_ADAPTER_HOME_SEGMENTS: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ["claude-code", [".claude"]],
+  ["gemini-cli", [".gemini"]],
+  ["antigravity", [".gemini"]],
+  ["antigravity-cli", [".gemini"]],
+  ["openclaw", [".openclaw"]],
+  ["codex", [".codex"]],
+  ["cursor", [".cursor"]],
+  ["vscode-copilot", [".vscode"]],
+  ["copilot-cli", [".copilot"]],
+  ["kiro", [".kiro"]],
+  ["pi", [".pi"]],
+  ["omp", [".omp"]],
+  ["qwen-code", [".qwen"]],
+  ["kilo", [".config", "kilo"]],
+  ["opencode", [".config", "opencode"]],
+  ["zed", [".config", "zed"]],
+  ["jetbrains-copilot", [".config", "JetBrains"]],
+];

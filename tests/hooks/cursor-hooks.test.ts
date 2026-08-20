@@ -58,7 +58,12 @@ describe("Cursor hooks", () => {
     const sessionsDir = join(resolveContextModeDataRoot(), "context-mode", "sessions");
     dbPath = join(sessionsDir, `${hash}.db`);
     eventsPath = join(sessionsDir, `${hash}-events.md`);
-    realDbPath = join(realHome, ".cursor", "context-mode", "sessions", `${hash}.db`);
+    // The real-home-pollution risk moved with the fix (code review finding
+    // 3b): nothing writes to ~/.cursor anymore, but a bug could still leak
+    // writes to the REAL global root (resolveContextModeDataRoot rooted at
+    // realHome, not the fake one) instead of the fake HOME the hook actually
+    // ran under. Retarget the guard there so it stays live.
+    realDbPath = join(resolveContextModeDataRoot(undefined, realHome), "context-mode", "sessions", `${hash}.db`);
   });
 
   afterAll(() => {

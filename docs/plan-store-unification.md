@@ -1,8 +1,29 @@
 # Plan: unify the store root (HANDOFF item 6)
 
 Status: phase 1 done, covering ALL providers (commits 4d1272e then 958397a,
-2026-08-20). Phases 2-4 not started. Created 2026-08-20.
+then a code-review fixup round, 2026-08-20). Phases 2-4 not started.
+Created 2026-08-20.
 Fixes HANDOFF.md item 6 (hook vs server store-root divergence).
+
+## BREAKING CHANGE (no CHANGELOG file exists in this repo - recorded here)
+
+`CODEX_HOME`, `COPILOT_HOME`, `KIMI_CODE_HOME`, `GEMINI_CLI_HOME`, and
+`CLAUDE_CONFIG_DIR` no longer relocate context-mode session/content storage.
+Before phase 1, setting one of these env vars moved BOTH that platform's own
+config (settings/hooks/config.toml) AND its context-mode session DB. As of
+phase 1, they still relocate platform-native config exactly as before, but
+context-mode storage always resolves the single shared global root
+(`resolveContextModeDataRoot()`), regardless of these env vars.
+
+Anyone who was relying on `CODEX_HOME`/`COPILOT_HOME`/`KIMI_CODE_HOME`/
+`GEMINI_CLI_HOME`/`CLAUDE_CONFIG_DIR` to keep context-mode storage off an NFS
+home, inside a dev container, or on a separate volume must switch to
+`CONTEXT_MODE_HOME` (or its back-compat alias `CONTEXT_MODE_DATA_DIR`)
+instead - that is now the ONLY env var that relocates context-mode storage,
+for every provider. The old codex adapter comment ("parity with the
+copilot-cli/kimi/opencode adapters... continues to steer session storage the
+way it always has") explicitly promised the opposite of this; that promise
+is now void, on purpose, per the scope decision above.
 
 ## Decision
 
@@ -208,28 +229,44 @@ statusline; adding a permanent `migrate` verb for a one-time operation is
 surface area we would then own forever. Promote it to a CLI command only if
 this fork is published for others to upgrade.
 
-NEW REQUIREMENT (found during phase 1, not previously recorded):
-`adoptLargestLegacyDb` (src/db-base.ts:766-778) only scans DIRECT dotfile
+NEW REQUIREMENT (found during phase 1; the two-level gap below was FIXED as
+part of the code-review fixup round, the rest is still open for phase 2):
+`adoptLargestLegacyDb` (src/db-base.ts) used to only scan DIRECT dotfile
 children of `homedir()` - `readdirSync(home)` filtered to entries starting
 with `.`, then `join(home, entry, "context-mode", subdir, fileName)`. That
-misses several of the now-frozen platform-rooted stores this plan needs to
+missed several of the now-frozen platform-rooted stores this plan needs to
 migrate:
-- opencode's old store was nested two levels deep, `~/.config/opencode/
-  context-mode/<subdir>/<hash>.db` (or `~/.config/kilo/...`) - the scan
-  checks `~/.config/context-mode/...` (wrong path, missing the `opencode`/
-  `kilo` segment) and will never find it.
-- jetbrains-copilot's old store was similarly nested,
-  `~/.config/JetBrains/context-mode/<subdir>/<hash>.db` - same miss.
-- vscode-copilot's old store was project-relative,
-  `<project>/.github/context-mode/<subdir>/<hash>.db` when a `.github` dir
-  existed in cwd - never under `homedir()` at all, so the scan can never find
-  it regardless of nesting.
-- Any platform whose config-dir env var (`CODEX_HOME`, `KIMI_CODE_HOME`,
-  `COPILOT_HOME`, `GEMINI_CLI_HOME`, ...) pointed the OLD store outside
-  `homedir()` - the scan has no env-var awareness at all.
-The phase 2 script must enumerate these stores explicitly (walk each
-adapter's OLD getConfigDir()-based path, not just `homedir()`'s direct
-children) rather than relying on `adoptLargestLegacyDb`'s scan.
+- FIXED: opencode's/kilo's/zed's old stores were nested two levels deep,
+  `~/.config/opencode/context-mode/<subdir>/<hash>.db` (or `.config/kilo`,
+  `.config/zed`), and jetbrains-copilot's the same at
+  `~/.config/JetBrains/context-mode/<subdir>/<hash>.db` - the one-level scan
+  checked `~/.config/context-mode/...` (wrong path, missing the extra
+  segment) and never found them. `adoptLargestLegacyDb` now ADDITIONALLY
+  checks the two-level entries in `LEGACY_ADAPTER_HOME_SEGMENTS`
+  (src/session/data-root.ts, shared with `enumerateAdapterDirs` so the two
+  lists can't drift apart) alongside the original one-level dotfile scan.
+  The one-level scan was kept, not replaced, specifically because it is
+  generic (matches ANY dotfile name) and is the only thing that catches
+  arbitrary user-chosen `CLAUDE_CONFIG_DIR` profile names
+  (`~/.claude-ime`, `~/.claude-devcom`, `~/.claude-personal`,
+  `~/.claude-observix`, ...) - replacing it with a fixed adapter-name list
+  (as first attempted) silently broke exactly this case, caught by the
+  existing `adoptLargestLegacyDb` test suite.
+- STILL OPEN (deferred to phase 2 - out of reach for a homedir-based
+  scanner, or too large a change for a contained fix): vscode-copilot's old
+  store was project-relative, `<project>/.github/context-mode/<subdir>/
+  <hash>.db` when a `.github` dir existed in cwd - never under `homedir()`
+  at all, and `adoptLargestLegacyDb` has no project-dir parameter, so no
+  homedir-rooted scan can find it regardless of nesting.
+- STILL OPEN (deferred to phase 2): any platform whose config-dir env var
+  (`CODEX_HOME`, `KIMI_CODE_HOME`, `COPILOT_HOME`, `GEMINI_CLI_HOME`, ...)
+  pointed the OLD store outside `homedir()` - the scan has no env-var
+  awareness at all, and adding it would require pulling each adapter's own
+  config-dir resolver (and its transitive imports) into src/db-base.ts,
+  which is more than a contained change to candidate enumeration.
+The phase 2 script must enumerate the two STILL OPEN cases above explicitly
+(walk each adapter's OLD getConfigDir()-based path and vscode-copilot's
+per-project `.github` path) rather than relying on `adoptLargestLegacyDb`.
 
 Behaviour:
 1. Enumerate every `<hash>.db` under `sessions/` and `content/` across all

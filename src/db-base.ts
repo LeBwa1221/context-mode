@@ -12,6 +12,7 @@ import { createRequire } from "node:module";
 import { existsSync, unlinkSync, renameSync, readdirSync, statSync, mkdirSync, copyFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { LEGACY_ADAPTER_HOME_SEGMENTS } from "./session/data-root.js";
 // v1.0.130 — `acquireDbLock` + `locking_mode = EXCLUSIVE` were REMOVED.
 // See docs/adr/0001-sessiondb-multi-writer.md for the architectural
 // rationale. The short version: SessionDB is multi-writer-safe and the
@@ -725,10 +726,21 @@ export function reopenAfterHeal(
  *
  * If `newDbPath` doesn't exist yet, scans every dot-directory directly
  * under `homedir()` (the legacy `~/.claude*`, `~/.codex`, `~/.cursor`, ...
- * profile roots) for `<dir>/context-mode/<subdir>/<fileName>`, and adopts
- * the LARGEST match by file size (the most complete history) by COPYING it
- * into place — legacy files are never deleted, per the "never delete old
- * files" requirement.
+ * profile roots - kept as a generic dotfile scan, not a fixed name list, so
+ * arbitrary user-chosen `CLAUDE_CONFIG_DIR` profile names like
+ * `~/.claude-ime` are still found), PLUS the two-level legacy roots in
+ * `LEGACY_ADAPTER_HOME_SEGMENTS` (src/session/data-root.ts - shared with
+ * `enumerateAdapterDirs`) that the one-level scan can't reach
+ * (`~/.config/opencode`, `~/.config/JetBrains`, `~/.config/kilo`,
+ * `~/.config/zed`), for `<root>/context-mode/<subdir>/<fileName>`, and
+ * adopts the LARGEST match by file size (the most complete history) by
+ * COPYING it into place — legacy files are never deleted, per the "never
+ * delete old files" requirement. Does NOT cover vscode-copilot's
+ * project-relative `.github/context-mode/...` store (no home-relative path
+ * exists for it) or any store relocated via a config-dir env var
+ * (`CODEX_HOME`, `COPILOT_HOME`, `KIMI_CODE_HOME`, `GEMINI_CLI_HOME`, ...)
+ * outside `$HOME` - both are phase 2 work, see
+ * docs/plan-store-unification.md.
  *
  * Concurrency: safe when several sessions start simultaneously. Both the
  * existence check and the final placement race, but every racer computes
@@ -763,15 +775,34 @@ export function adoptLargestLegacyDb(opts: {
     return false;
   }
 
-  let best: { path: string; size: number } | null = null;
+  // Candidate roots: every dotfile directly under homedir() (kept generic,
+  // not driven off a fixed name list, so it still catches arbitrary
+  // CLAUDE_CONFIG_DIR profile names like .claude-ime/.claude-devcom, which
+  // are user-chosen and can't be enumerated up front), PLUS the two-level
+  // legacy roots in LEGACY_ADAPTER_HOME_SEGMENTS (src/session/data-root.ts -
+  // shared with enumerateAdapterDirs) that the one-level scan structurally
+  // cannot reach (.config/opencode, .config/JetBrains, .config/kilo,
+  // .config/zed). Does NOT cover vscode-copilot's project-relative .github
+  // store or any store relocated via a config-dir env var (CODEX_HOME,
+  // COPILOT_HOME, ...) outside $HOME - both are phase 2 work
+  // (docs/plan-store-unification.md).
+  const candidates: string[] = [];
   for (const entry of entries) {
     if (!entry.startsWith(".")) continue; // profile dirs are all dotfiles (.claude, .codex, ...)
-    const candidate = join(home, entry, "context-mode", subdir, fileName);
+    candidates.push(join(home, entry, "context-mode", subdir, fileName));
+  }
+  for (const [, segments] of LEGACY_ADAPTER_HOME_SEGMENTS) {
+    if (segments.length < 2) continue; // already covered by the one-level scan above
+    candidates.push(join(home, ...segments, "context-mode", subdir, fileName));
+  }
+
+  let best: { path: string; size: number } | null = null;
+  for (const candidate of candidates) {
     let st;
     try {
       st = statSync(candidate);
     } catch {
-      continue; // not present under this profile
+      continue; // not present under this legacy root
     }
     if (!st.isFile()) continue;
     if (!best || st.size > best.size) best = { path: candidate, size: st.size };

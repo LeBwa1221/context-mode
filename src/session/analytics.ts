@@ -17,6 +17,7 @@ import { loadDatabase as loadDatabaseImpl } from "../db-base.js";
 import { ensureSessionEventsSchema } from "./db.js";
 import { resolveClaudeConfigDir } from "../util/claude-config.js";
 import { resolveContextModeDataRoot } from "../adapters/base.js";
+import { LEGACY_ADAPTER_HOME_SEGMENTS } from "./data-root.js";
 import { estimateTokens } from "./token-estimate.js";
 
 /** Clamp a percentage into [0, 100] — a savings ratio must never report above 100%. */
@@ -674,27 +675,10 @@ export function enumerateAdapterDirs(opts?: {
     ?? (opts?.home ? join(opts.home, ".claude") : resolveClaudeConfigDir());
   // Legacy per-profile segments, unchanged from before the global-store fix
   // — still the correct place to look for historical, not-yet-migrated data.
-  // Mirrors `getSessionDirSegments` in src/adapters/detect.ts:92-111.
-  const map: ReadonlyArray<readonly [string, readonly string[]]> = [
-    ["claude-code",      [".claude"]],
-    ["gemini-cli",       [".gemini"]],
-    ["antigravity",      [".gemini"]],
-    ["antigravity-cli",  [".gemini"]],
-    ["openclaw",         [".openclaw"]],
-    ["codex",            [".codex"]],
-    ["cursor",           [".cursor"]],
-    ["vscode-copilot",   [".vscode"]],
-    ["copilot-cli",      [".copilot"]],
-    ["kiro",             [".kiro"]],
-    ["pi",               [".pi"]],
-    ["omp",              [".omp"]],
-    ["qwen-code",        [".qwen"]],
-    ["kilo",             [".config", "kilo"]],
-    ["opencode",         [".config", "opencode"]],
-    ["zed",              [".config", "zed"]],
-    ["jetbrains-copilot", [".config", "JetBrains"]],
-  ];
-  const legacy: AdapterDirEntry[] = map.map(([name, segments]) => {
+  // Mirrors `getSessionDirSegments` in src/adapters/detect.ts:92-111. Shared
+  // with `adoptLargestLegacyDb` (src/db-base.ts) via
+  // LEGACY_ADAPTER_HOME_SEGMENTS so the two lists can't drift apart.
+  const legacy: AdapterDirEntry[] = LEGACY_ADAPTER_HOME_SEGMENTS.map(([name, segments]) => {
     // claude-code honors $CLAUDE_CONFIG_DIR via resolveClaudeConfigDir (#865);
     // every other adapter stays rooted at $HOME.
     const base = name === "claude-code"
