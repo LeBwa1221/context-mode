@@ -102,12 +102,15 @@ the server (`src/server.ts:594-596`) - it was never part of the bug. The real
 divergence was solely `resolveDefaultSessionDir`'s own default branch (no
 override, no legacy env) building a profile-scoped path via
 `resolveConfigDirForDefaultSession(configDir, configDirEnv, env)`, while
-`BaseAdapter.getSessionDir()` used `resolveContextModeDataRoot()`. Fixed at
-commit `4d1272e` (phase 1, Claude Code only - see
-`docs/plan-store-unification.md`).
+`BaseAdapter.getSessionDir()` used `resolveContextModeDataRoot()`. First
+fixed for Claude Code only at commit `4d1272e`, then extended to EVERY
+provider at commit `958397a` (phase 1, see `docs/plan-store-unification.md`)
+after investigation found no functional requirement for platform-rooted
+stores, and found that vscode-copilot's `getSessionDir()` override diverged
+from its own hooks for real (see below), not just Claude Code's.
 
-The fork had two independent store-root resolvers for the Claude Code path
-that were never unified:
+The fork had independent store-root resolvers for every provider that were
+never unified:
 
 - MCP server: `resolveContextModeDataRoot()`, extracted to
   `src/session/data-root.ts` and re-exported from `src/adapters/base.ts`
@@ -118,14 +121,29 @@ that were never unified:
   Honors `CONTEXT_MODE_HOME` / `CONTEXT_MODE_DATA_DIR`.
 - Hooks: `resolveDefaultSessionDir()` in `src/session/db.ts`, reached from
   `hooks/session-helpers.mjs:382-388` (`resolveSessionDir`) and `:408-419`
-  (`getSessionDBPath`, `getSessionEventsPath`). Resolved PROFILE-SCOPED to
-  `~/<CLAUDE_CONFIG_DIR or .claude>/context-mode/sessions` for Claude Code.
+  (`getSessionDBPath`, `getSessionEventsPath`). Resolved PROFILE/PLATFORM
+  -SCOPED to `~/<CLAUDE_CONFIG_DIR or .claude>/context-mode/sessions` for
+  Claude Code, and analogously `~/.gemini`, `~/.cursor`, `~/.kiro`,
+  `~/.config/JetBrains`, etc. for every other platform with a hook OPTS
+  entry.
+- Additionally, five adapters (codex, opencode, vscode-copilot, copilot-cli,
+  kimi) overrode `getSessionDir()` on the SERVER side too, with their own
+  non-global fallback (`~/.codex`, XDG/APPDATA-rooted, `.github`-or-
+  `~/.vscode`, COPILOT_HOME-aware, `~/.kimi-code`) when no
+  CONTEXT_MODE_HOME/CONTEXT_MODE_DATA_DIR override was set.
+  vscode-copilot's override DIVERGED FOR REAL from its own hooks:
+  `VSCodeCopilotAdapter.getSessionDir()` preferred project-local
+  `.github/context-mode/sessions` when a `.github` dir existed in cwd, while
+  `VSCODE_OPTS` (`configDirEnv: undefined`) always resolved `~/.vscode`
+  regardless. The other four adapters' overrides happened to match their own
+  hooks, but still split from every OTHER platform's storage root.
 
 Consequence (before the phase 1 fix): `hooks/posttooluse.mjs:43`,
-`hooks/sessionstart.mjs:197`, and `hooks/stop.mjs:27` wrote real
-`session_events` and `tool_calls` into the profile-scoped DB on every Claude
-Code session, unconditionally, while `ctx_search` / `ctx_stats` read the
-global store. This was the default code path, not a misconfiguration.
+`hooks/sessionstart.mjs:197`, and `hooks/stop.mjs:27` (and the equivalent
+hooks for every other platform) wrote real `session_events` and `tool_calls`
+into a profile/platform-scoped DB on every session, unconditionally, while
+`ctx_search` / `ctx_stats` read the global store. This was the default code
+path, not a misconfiguration.
 
 Why it looks migrated but is not: `adoptLargestLegacyDb()` (`src/db-base.ts:746`)
 does a ONE-SHOT copy gated by `if (existsSync(newDbPath)) return false;`
@@ -142,18 +160,26 @@ had 1441 chunks vs 606 in the global copy (835 chunks existing only in the
 profile store), while the global copy had rows the legacy one lacked
 (`tool_calls` 44 vs 41, `session_resume` 1 vs 0). Neither side is a superset.
 
-TRAP - phase 1 (commit `4d1272e`) unified the resolver ONLY. The global DBs
-already exist, so `adoptLargestLegacyDb` does not fire, and the pre-existing
-profile-side Claude Code data is still stranded there - phase 1 was
-explicitly scoped to stop new writes from diverging further, not to migrate
-what already diverged. Phase 2 (a real merge, not a redirect) is still not
-started. See `docs/plan-store-unification.md`.
+TRAP - phase 1 (commits `4d1272e` then `958397a`) unified the resolver for
+EVERY provider. The global DBs already exist for most projects, so
+`adoptLargestLegacyDb` does not fire, and the pre-existing profile/platform
+-side data (Claude Code AND every other platform, including the ones
+`adoptLargestLegacyDb`'s scan can never reach - see
+`docs/plan-store-unification.md`'s phase 2 NEW REQUIREMENT: opencode/
+jetbrains-copilot's nested config paths, vscode-copilot's project-relative
+`.github` store, and any env-var-relocated store) is still stranded there -
+phase 1 was explicitly scoped to stop new writes from diverging further, not
+to migrate what already diverged. Phase 2 (a real merge, not a redirect) is
+still not started.
 
-Fix sites (phase 1, done): `hooks/session-helpers.mjs:382-388` and
-`src/session/db.ts` (`resolveDefaultSessionDir`), scoped to
-`configDirEnv === "CLAUDE_CONFIG_DIR"` only - every other platform,
-including the five adapters that deliberately override `getSessionDir`
-(codex, opencode, vscode-copilot, copilot-cli, kimi), is unchanged.
+Fix sites (phase 1, done): `hooks/session-helpers.mjs` (all platform OPTS)
+and `src/session/db.ts` (`resolveDefaultSessionDir`, now unconditional - no
+per-platform scoping), plus removal of the five `getSessionDir()` overrides
+in `src/adapters/{codex,opencode,vscode-copilot,copilot-cli,kimi}/index.ts`.
+`getConfigDir()`/`getSettingsPath()` on all five are untouched - only the
+session/content STORE root moved. `CONTEXT_MODE_HOME`/`CONTEXT_MODE_DATA_DIR`
+still win for every provider (issue #649's actual rationale, an env-var
+escape hatch for CI/dev-container/NFS users, is preserved).
 
 Also confirmed while investigating: the `stats-pid-<N>.json` files in
 `~/.claude-personal` and `~/.claude-observix` are STALE artifacts from a
