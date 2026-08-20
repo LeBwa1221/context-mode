@@ -3,7 +3,7 @@
  * PreToolUse fail-open brick guard.
  *
  * Spawns each hook script with a real Copilot-CLI-shaped (snake_case) payload
- * and asserts it persists to the session DB under ~/.copilot/context-mode/.
+ * and asserts it persists to the session DB under the shared global root.
  * Regression guard for the Stop bug: a `session_end` event without a `data`
  * field throws inside insertEvent (createHash(undefined)) and is silently
  * dropped — the hook must supply data/category/priority.
@@ -15,6 +15,7 @@ import Database from "better-sqlite3";
 import { mkdtempSync, rmSync, readdirSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 
 const REPO = resolve(__dirname, "..", "..");
 const SID = "copilot-cap-session";
@@ -30,7 +31,9 @@ function dispatch(hook: string, payload: Record<string, unknown>, home: string) 
 }
 
 function openDB(home: string): Database.Database {
-  const dir = join(home, ".copilot", "context-mode", "sessions");
+  // maint/integration: session storage is the shared global root now, not
+  // ~/.copilot.
+  const dir = join(resolveContextModeDataRoot(undefined, home), "context-mode", "sessions");
   const file = existsSync(dir) ? readdirSync(dir).find((f) => f.endsWith(".db")) : undefined;
   if (!file) throw new Error("no session DB created");
   return new Database(join(dir, file));

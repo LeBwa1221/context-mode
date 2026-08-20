@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, rmSync, existsSync, unlinkSync, writeFileSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 
 const _hashCanonical = (p: string) => createHash("sha256").update(
   (process.platform === "darwin" || process.platform === "win32") ? p.toLowerCase() : p,
@@ -58,7 +59,9 @@ describe("Kimi Code hooks", () => {
   beforeAll(() => {
     tempDir = realpathSync(mkdtempSync(join(tmpdir(), "kimi-hook-test-")));
     const hash = _hashCanonical(normalizeProjectPathForSessionHash(tempDir));
-    const sessionsDir = join(fakeHome, ".kimi-code", "context-mode", "sessions");
+    // maint/integration: session storage is the shared global root now, not
+    // ~/.kimi-code.
+    const sessionsDir = join(resolveContextModeDataRoot(undefined, fakeHome), "context-mode", "sessions");
     dbPath = join(sessionsDir, `${hash}.db`);
   });
 

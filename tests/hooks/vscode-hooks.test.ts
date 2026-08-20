@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, rmSync, rmdirSync, readdirSync, existsSync, unlinkSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir, homedir } from "node:os";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 
 
 const _hashCanonical = (p: string) => createHash("sha256").update(
@@ -106,7 +107,9 @@ describe("VS Code Copilot hooks", () => {
   beforeAll(() => {
     tempDir = mkdtempSync(join(tmpdir(), "vscode-hook-test-"));
     const hash = _hashCanonical(tempDir);
-    const sessionsDir = join(homedir(), ".vscode", "context-mode", "sessions");
+    // maint/integration: session storage is the shared global root now, not
+    // ~/.vscode.
+    const sessionsDir = join(resolveContextModeDataRoot(), "context-mode", "sessions");
     dbPath = join(sessionsDir, `${hash}.db`);
     eventsPath = join(sessionsDir, `${hash}-events.md`);
   });
@@ -365,13 +368,16 @@ describe("VS Code Copilot hooks — MCP cwd != hook projectDir worktree-suffix (
     // existsSync assertion is vacuously false.
     const mcpHash = _hashCanonical(mcpDir.replace(/\\/g, "/"));
     const wtHash = _hashCanonical(worktreeDir.replace(/\\/g, "/"));
-    const configDir = join(homedir(), ".vscode", "context-mode");
-    const sessionsDir = join(configDir, "sessions");
+    // DEBUG_LOG (posttooluse-debug.log) is a hook-internal log under
+    // ~/.vscode/context-mode, unaffected by session storage. Session
+    // storage itself is the shared global root now (maint/integration).
+    const debugLogDir = join(homedir(), ".vscode", "context-mode");
+    const sessionsDir = join(resolveContextModeDataRoot(), "context-mode", "sessions");
     // Ensure DEBUG_LOG parent dir exists — posttooluse.mjs appends to
     // ~/.vscode/context-mode/posttooluse-debug.log on entry before
     // getSessionDBPath() (which mkdir's its sessions/ subdir) runs.
     const { mkdirSync: mk } = await import("node:fs");
-    mk(configDir, { recursive: true });
+    mk(debugLogDir, { recursive: true });
     mcpDbPath = join(sessionsDir, `${mcpHash}.db`);
     worktreeDbPath = join(sessionsDir, `${wtHash}.db`);
   });

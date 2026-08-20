@@ -8,10 +8,17 @@
  *   - backupSettings()      — copies settings file to .bak
  *
  * Adapters with custom logic override the relevant method:
- *   - vscode-copilot: overrides getSessionDir (checks .github dir)
- *   - opencode: overrides getSessionDir (XDG_CONFIG_HOME / APPDATA)
- *              and backupSettings (calls checkPluginRegistration first)
+ *   - opencode: overrides backupSettings (calls checkPluginRegistration first)
  *   - openclaw: overrides backupSettings (searches 3 config paths)
+ *
+ * maint/integration (2026-08-20): no adapter overrides getSessionDir()
+ * anymore - codex, opencode, vscode-copilot, copilot-cli, and kimi used to,
+ * each falling back to a platform-rooted dir (~/.codex, ~/.vscode, .github/,
+ * ...) when no CONTEXT_MODE_HOME/CONTEXT_MODE_DATA_DIR override was set.
+ * vscode-copilot's override diverged for real from its own hooks (see
+ * HANDOFF.md item 6); the others matched their hooks but still split from
+ * every OTHER platform's storage root. All platforms now share ONE global
+ * root by construction, via this class's own getSessionDir() below.
  *
  * NOTE — C2 narrowing (2026-05): `getSessionDBPath` and `getSessionEventsPath`
  * were removed. Both were SHALLOW pure derivatives of `getSessionDir() +
@@ -29,10 +36,11 @@
  * abusing the host platform's own config-dir variable. The override applies
  * only to context-mode-owned state (`getSessionDir`, `getMemoryDir`) — never
  * to platform-native config (`getConfigDir`, `getSettingsPath`), which must
- * stay where the host platform's own tooling expects it. Adapters that
- * override `getSessionDir`/`getMemoryDir` directly (claude-code, codex,
- * opencode, vscode-copilot) honor the override by routing through
- * `resolveContextModeDataRoot()` at the top of their override.
+ * stay where the host platform's own tooling expects it. `getSessionDir` is
+ * this class's shared default for every adapter (see maint/integration note
+ * above); adapters that still override `getMemoryDir` directly (codex, kimi,
+ * ...) honor the override by routing through `resolveContextModeDataRoot()`
+ * at the top of their override.
  *
  * maint/global-store — the same project opened under different Claude Code
  * profiles (`~/.claude`, `~/.claude-ime`, `~/.claude-devcom`, ...) used to

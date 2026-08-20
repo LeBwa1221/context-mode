@@ -13,13 +13,12 @@
  *   - Session ID: input.sessionID (camelCase!)
  *   - Project dir: ctx.directory in plugin init (no env var)
  *   - Config: opencode.json plugin array, .opencode/plugins/*.ts
- *   - Session dir: ~/.config/opencode/context-mode/sessions/
+ *   - Session dir: BaseAdapter's global default (resolveContextModeDataRoot)
  */
 
 import {
   readFileSync,
   writeFileSync,
-  mkdirSync,
   copyFileSync,
   accessSync,
   existsSync,
@@ -28,7 +27,7 @@ import {
 import { resolve, join } from "node:path";
 import { homedir } from "node:os";
 
-import { BaseAdapter, resolveContextModeDataRootOverride } from "../base.js";
+import { BaseAdapter } from "../base.js";
 import { stripJsonComments } from "../../util/jsonc.js";
 
 import type {
@@ -271,18 +270,10 @@ export class OpenCodeAdapter extends BaseAdapter implements HookAdapter {
     ];
   }
 
-  getSessionDir(): string {
-    // Issue #649: honor CONTEXT_MODE_DATA_DIR universal storage override
-    // ahead of OpenCode/Kilo's XDG-rooted default. opencode.json + plugin
-    // discovery stay under getConfigDir() so OpenCode itself sees its own
-    // config in the expected location.
-    const override = resolveContextModeDataRootOverride();
-    const dir = override
-      ? join(override, "context-mode", "sessions")
-      : join(this.getConfigDir(), "context-mode", "sessions");
-    mkdirSync(dir, { recursive: true });
-    return dir;
-  }
+  // maint/integration: getSessionDir() override removed - session storage
+  // now always uses BaseAdapter's global default (resolveContextModeDataRoot,
+  // still honoring CONTEXT_MODE_HOME/CONTEXT_MODE_DATA_DIR). opencode.json +
+  // plugin discovery still stay under getConfigDir(), unaffected.
 
   /**
    * OpenCode/KiloCode honor XDG_CONFIG_HOME on POSIX and APPDATA on Windows.

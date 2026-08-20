@@ -91,57 +91,29 @@ describe("storage path resolution", () => {
     });
   });
 
-  test("shared default session dir helper derives context-mode sessions root for non-Claude-Code platforms", () => {
-    // Unchanged (maint/integration) behavior for every platform whose
-    // configDirEnv isn't "CLAUDE_CONFIG_DIR" — see the next two tests for
-    // the Claude-Code-specific global-root branch.
-    const configRoot = join(tmpdir(), "context-mode-config-root");
-
-    expect(resolveDefaultSessionDir({ configDir: configRoot })).toBe(
-      join(configRoot, "context-mode", "sessions"),
-    );
-  });
-
-  test("shared default session dir helper honors config env override for non-Claude-Code platforms", () => {
-    const configRoot = join(tmpdir(), "context-mode-env-config-root");
-
-    expect(
-      resolveDefaultSessionDir({
-        configDir: ".ignored",
-        configDirEnv: "CONTEXT_MODE_TEST_CONFIG_DIR",
-        env: { CONTEXT_MODE_TEST_CONFIG_DIR: configRoot },
-      }),
-    ).toBe(join(configRoot, "context-mode", "sessions"));
-  });
-
-  test("shared default session dir helper resolves the shared global root for Claude Code (maint/integration)", () => {
-    // HANDOFF.md item 6: Claude Code hooks used to build a profile-scoped
-    // path from configDir/homedir() while ClaudeCodeAdapter.getSessionDir()
-    // (which does not override BaseAdapter's default) already resolved
-    // resolveContextModeDataRoot(). Scoped to configDirEnv ===
-    // "CLAUDE_CONFIG_DIR" (see resolveDefaultSessionDir) — configDir itself
-    // is ignored once that branch is taken.
+  test("shared default session dir helper resolves the shared global root for every platform (maint/integration)", () => {
+    // HANDOFF.md item 6 / user scope decision: no adapter overrides
+    // getSessionDir() anymore, so resolveDefaultSessionDir's default branch
+    // resolves resolveContextModeDataRoot() unconditionally - configDir and
+    // configDirEnv (platform-specific by convention: .claude, .codex,
+    // .vscode, ...) no longer affect the result at all.
     const globalRoot = join(tmpdir(), "context-mode-global-root");
 
     expect(
-      resolveDefaultSessionDir({
-        configDir: ".claude",
-        configDirEnv: "CLAUDE_CONFIG_DIR",
-        env: { CONTEXT_MODE_HOME: globalRoot },
-      }),
+      resolveDefaultSessionDir({ configDir: ".ignored", env: { CONTEXT_MODE_HOME: globalRoot } }),
     ).toBe(join(globalRoot, "context-mode", "sessions"));
   });
 
-  test("shared default session dir helper ignores CLAUDE_CONFIG_DIR, honors CONTEXT_MODE_DATA_DIR alias", () => {
-    const ignoredConfigRoot = join(tmpdir(), "context-mode-env-config-root-2");
+  test("shared default session dir helper ignores configDirEnv, honors CONTEXT_MODE_DATA_DIR alias", () => {
+    const ignoredConfigRoot = join(tmpdir(), "context-mode-env-config-root");
     const dataDirRoot = join(tmpdir(), "context-mode-data-dir-root");
 
     expect(
       resolveDefaultSessionDir({
-        configDir: ".claude",
-        configDirEnv: "CLAUDE_CONFIG_DIR",
+        configDir: ".ignored",
+        configDirEnv: "CODEX_HOME",
         env: {
-          CLAUDE_CONFIG_DIR: ignoredConfigRoot,
+          CODEX_HOME: ignoredConfigRoot,
           CONTEXT_MODE_DATA_DIR: dataDirRoot,
         },
       }),

@@ -15,6 +15,7 @@ import { mkdtempSync, rmSync, existsSync, unlinkSync, readFileSync } from "node:
 import { createHash } from "node:crypto";
 import { tmpdir, homedir } from "node:os";
 import { resolve } from "node:path";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 
 
 const _hashCanonical = (p: string) => createHash("sha256").update(
@@ -53,7 +54,9 @@ describe("Gemini CLI hooks", () => {
   beforeAll(() => {
     tempDir = mkdtempSync(join(tmpdir(), "gemini-hook-test-"));
     const hash = _hashCanonical(tempDir);
-    const sessionsDir = join(homedir(), ".gemini", "context-mode", "sessions");
+    // maint/integration: session storage is the shared global root now, not
+    // ~/.gemini.
+    const sessionsDir = join(resolveContextModeDataRoot(), "context-mode", "sessions");
     dbPath = join(sessionsDir, `${hash}.db`);
     eventsPath = join(sessionsDir, `${hash}-events.md`);
   });
@@ -269,13 +272,16 @@ describe("Gemini CLI hooks — MCP cwd != hook projectDir worktree-suffix (#435)
     // existsSync assertion is vacuously false.
     const mcpHash = _hashCanonical(mcpDir.replace(/\\/g, "/"));
     const wtHash = _hashCanonical(worktreeDir.replace(/\\/g, "/"));
-    const configDir = join(homedir(), ".gemini", "context-mode");
-    const sessionsDir = join(configDir, "sessions");
+    // DEBUG_LOG (aftertool-debug.log) is a hook-internal log under
+    // ~/.gemini/context-mode, unaffected by session storage. Session
+    // storage itself is the shared global root now (maint/integration).
+    const debugLogDir = join(homedir(), ".gemini", "context-mode");
+    const sessionsDir = join(resolveContextModeDataRoot(), "context-mode", "sessions");
     // Ensure DEBUG_LOG parent dir exists — aftertool.mjs appends to
     // ~/.gemini/context-mode/aftertool-debug.log on entry before
     // getSessionDBPath() (which mkdir's its sessions/ subdir) runs.
     const { mkdirSync: mk } = await import("node:fs");
-    mk(configDir, { recursive: true });
+    mk(debugLogDir, { recursive: true });
     mcpDbPath = join(sessionsDir, `${mcpHash}.db`);
     worktreeDbPath = join(sessionsDir, `${wtHash}.db`);
   });

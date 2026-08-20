@@ -5,6 +5,7 @@ import { tmpdir, homedir } from "node:os";
 import { join, parse, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { OpenCodeAdapter } from "../../src/adapters/opencode/index.js";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 
 function env(home: string) {
   const root = parse(home).root;
@@ -177,17 +178,11 @@ describe("OpenCodeAdapter", () => {
       expect(adapter.getSettingsPath()).toBe(resolve("opencode.json"));
     });
 
-    it("session dir is under platform-specific config directory", () => {
-      const sessionDir = adapter.getSessionDir();
-      let expectedDir: string;
-      if (process.platform === "win32") {
-        const configDir = process.env.APPDATA || join(homedir(), "AppData", "Roaming");
-        expectedDir = join(configDir, "opencode", "context-mode", "sessions");
-      } else {
-        const configDir = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-        expectedDir = join(configDir, "opencode", "context-mode", "sessions");
-      }
-      expect(sessionDir).toBe(expectedDir);
+    it("session dir is the shared global root, not the platform-specific config directory (maint/integration)", () => {
+      // getSessionDir() no longer overrides with an XDG/APPDATA-rooted
+      // fallback - all platforms share BaseAdapter's global default.
+      expect(adapter.getSessionDir()).toBe(join(resolveContextModeDataRoot(), "context-mode", "sessions"));
+      expect(adapter.getSessionDir()).not.toContain("opencode");
     });
 
     it("configureAllHooks writes back to the global config it read", () => {
@@ -634,17 +629,11 @@ describe("OpenCodeAdapter for KiloCode", () => {
       expect(adapter.getSettingsPath()).toBe(resolve("kilo.json"));
     });
 
-    it("session dir is under platform-specific config directory", () => {
-      const sessionDir = adapter.getSessionDir();
-      let expectedDir: string;
-      if (process.platform === "win32") {
-        const configDir = process.env.APPDATA || join(homedir(), "AppData", "Roaming");
-        expectedDir = join(configDir, "kilo", "context-mode", "sessions");
-      } else {
-        const configDir = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-        expectedDir = join(configDir, "kilo", "context-mode", "sessions");
-      }
-      expect(sessionDir).toBe(expectedDir);
+    it("session dir is the shared global root, not the platform-specific config directory (maint/integration)", () => {
+      // getSessionDir() no longer overrides with an XDG/APPDATA-rooted
+      // fallback - all platforms share BaseAdapter's global default.
+      expect(adapter.getSessionDir()).toBe(join(resolveContextModeDataRoot(), "context-mode", "sessions"));
+      expect(adapter.getSessionDir()).not.toContain("kilo");
     });
 
     // Phase 7 Kilo-1 (LOW): Kilo runtime accepts `.kilocode/` as config dir

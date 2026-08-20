@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import { loadDatabase } from "../../src/db-base.js";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CODEX_USER_PROMPT_PATH = join(__dirname, "..", "..", "hooks", "codex", "userpromptsubmit.mjs");
@@ -21,8 +22,10 @@ function runHook(path: string, input: Record<string, unknown>, env: Record<strin
   });
 }
 
-function readGoalRows(codexHome: string) {
-  const sessionDir = join(codexHome, "context-mode", "sessions");
+function readGoalRows(fakeHome: string) {
+  // maint/integration: session storage is the shared global root now, not
+  // $CODEX_HOME.
+  const sessionDir = join(resolveContextModeDataRoot(undefined, fakeHome), "context-mode", "sessions");
   const dbFiles = readdirSync(sessionDir).filter((file) => file.endsWith(".db"));
   const Database = loadDatabase();
   const rows: Array<{ data: string; priority: number }> = [];
@@ -83,7 +86,7 @@ describe("hooks/codex — /goal survives compact resume context", () => {
     );
     expect(promptResult.status, promptResult.stderr || promptResult.stdout).toBe(0);
 
-    expect(readGoalRows(codexHome)).toEqual([
+    expect(readGoalRows(fakeHome)).toEqual([
       expect.objectContaining({ data: objective, priority: 4 }),
     ]);
 

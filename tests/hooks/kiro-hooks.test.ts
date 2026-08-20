@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, rmSync, existsSync, unlinkSync, writeFileSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir, homedir } from "node:os";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 
 
 const _hashCanonical = (p: string) => createHash("sha256").update(
@@ -65,7 +66,9 @@ describe("Kiro hooks", () => {
     // realpath, so hash the realpath here too or DB lookup hashes will diverge.
     tempDir = realpathSync(mkdtempSync(join(tmpdir(), "kiro-hook-test-")));
     const hash = _hashCanonical(normalizeProjectPathForSessionHash(tempDir));
-    const sessionsDir = join(homedir(), ".kiro", "context-mode", "sessions");
+    // maint/integration: session storage is the shared global root now, not
+    // ~/.kiro.
+    const sessionsDir = join(resolveContextModeDataRoot(), "context-mode", "sessions");
     dbPath = join(sessionsDir, `${hash}.db`);
   });
 

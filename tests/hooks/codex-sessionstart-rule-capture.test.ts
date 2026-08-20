@@ -6,12 +6,15 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import { loadDatabase } from "../../src/db-base.js";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CODEX_SESSIONSTART_PATH = join(__dirname, "..", "..", "hooks", "codex", "sessionstart.mjs");
 
-function readRuleRows(codexHome: string) {
-  const sessionDir = join(codexHome, "context-mode", "sessions");
+function readRuleRows(fakeHome: string) {
+  // maint/integration: session storage is the shared global root now, not
+  // $CODEX_HOME.
+  const sessionDir = join(resolveContextModeDataRoot(undefined, fakeHome), "context-mode", "sessions");
   const dbFiles = readdirSync(sessionDir).filter((file) => file.endsWith(".db"));
   const Database = loadDatabase();
   const rows: Array<{ type: string; data: string }> = [];
@@ -73,7 +76,7 @@ describe("hooks/codex/sessionstart.mjs — rule capture", () => {
 
     expect(result.status, result.stderr || result.stdout).toBe(0);
 
-    const rows = readRuleRows(codexHome);
+    const rows = readRuleRows(fakeHome);
     expect(rows).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ type: "rule", data: join(fakeProject, "AGENTS.md") }),

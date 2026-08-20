@@ -31,6 +31,26 @@ import { randomUUID } from "node:crypto";
 
 import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 import { ClaudeCodeAdapter } from "../../src/adapters/claude-code/index.js";
+import { GeminiCLIAdapter } from "../../src/adapters/gemini-cli/index.js";
+import { AntigravityCliAdapter } from "../../src/adapters/antigravity-cli/index.js";
+import { VSCodeCopilotAdapter } from "../../src/adapters/vscode-copilot/index.js";
+import { CopilotCliAdapter } from "../../src/adapters/copilot-cli/index.js";
+import { CursorAdapter } from "../../src/adapters/cursor/index.js";
+import { CodexAdapter } from "../../src/adapters/codex/index.js";
+import { KiroAdapter } from "../../src/adapters/kiro/index.js";
+import { KimiAdapter } from "../../src/adapters/kimi/index.js";
+import { JetBrainsCopilotAdapter } from "../../src/adapters/jetbrains-copilot/index.js";
+import {
+  GEMINI_OPTS,
+  ANTIGRAVITY_CLI_OPTS,
+  VSCODE_OPTS,
+  COPILOT_OPTS,
+  CURSOR_OPTS,
+  CODEX_OPTS,
+  KIRO_OPTS,
+  KIMI_OPTS,
+  JETBRAINS_OPTS,
+} from "../../hooks/session-helpers.mjs";
 import { adoptLargestLegacyDb } from "../../src/db-base.js";
 import {
   hashProjectDirCanonical,
@@ -139,26 +159,69 @@ describe("one project resolves to ONE db regardless of CLAUDE_CONFIG_DIR", () =>
 // ─────────────────────────────────────────────────────────
 
 describe("hooks path resolves to the same directory as the adapter path", () => {
-  it("resolveDefaultSessionDir (hooks) matches ClaudeCodeAdapter.getSessionDir() (server)", () => {
+  // Table-driven over every adapter that has a hook OPTS entry in
+  // hooks/session-helpers.mjs. CLAUDE_OPTS itself isn't exported (it's the
+  // module's implicit default), so its shape is reproduced literally here -
+  // it must stay in sync with hooks/session-helpers.mjs's CLAUDE_OPTS.
+  const CLAUDE_OPTS_LITERAL = { configDir: ".claude", configDirEnv: "CLAUDE_CONFIG_DIR" };
+
+  const cases: Array<{ name: string; makeAdapter: () => { getSessionDir(): string }; opts: { configDir: string; configDirEnv?: string } }> = [
+    { name: "claude-code", makeAdapter: () => new ClaudeCodeAdapter(), opts: CLAUDE_OPTS_LITERAL },
+    { name: "gemini-cli", makeAdapter: () => new GeminiCLIAdapter(), opts: GEMINI_OPTS },
+    { name: "antigravity-cli", makeAdapter: () => new AntigravityCliAdapter(), opts: ANTIGRAVITY_CLI_OPTS },
+    { name: "vscode-copilot", makeAdapter: () => new VSCodeCopilotAdapter(), opts: VSCODE_OPTS },
+    { name: "copilot-cli", makeAdapter: () => new CopilotCliAdapter(), opts: COPILOT_OPTS },
+    { name: "cursor", makeAdapter: () => new CursorAdapter(), opts: CURSOR_OPTS },
+    { name: "codex", makeAdapter: () => new CodexAdapter(), opts: CODEX_OPTS },
+    { name: "kiro", makeAdapter: () => new KiroAdapter(), opts: KIRO_OPTS },
+    { name: "kimi", makeAdapter: () => new KimiAdapter(), opts: KIMI_OPTS },
+    { name: "jetbrains-copilot", makeAdapter: () => new JetBrainsCopilotAdapter(), opts: JETBRAINS_OPTS },
+  ];
+
+  for (const { name, makeAdapter, opts } of cases) {
+    it(`${name}: resolveDefaultSessionDir (hooks) matches adapter.getSessionDir() (server)`, () => {
+      const adapterDir = makeAdapter().getSessionDir();
+      const hooksDir = resolveSessionStorageDir(() =>
+        resolveDefaultSessionDir({ configDir: opts.configDir, configDirEnv: opts.configDirEnv }),
+      ).path;
+
+      expect(hooksDir).toBe(adapterDir);
+    });
+  }
+
+  it("claude-code: stays identical across simulated profile switches, matching the adapter path", () => {
     delete process.env.CLAUDE_CONFIG_DIR;
-
-    const adapterDir = new ClaudeCodeAdapter().getSessionDir();
-    const hooksDir = resolveSessionStorageDir(() =>
-      resolveDefaultSessionDir({ configDir: ".claude", configDirEnv: "CLAUDE_CONFIG_DIR" }),
-    ).path;
-
-    expect(hooksDir).toBe(adapterDir);
-  });
-
-  it("stays identical across simulated profile switches, matching the adapter path", () => {
     const adapterDir = new ClaudeCodeAdapter().getSessionDir();
 
     for (const profile of [".claude-ime", ".claude-devcom", ".claude-personal"]) {
       process.env.CLAUDE_CONFIG_DIR = join(fakeHome, profile);
       const hooksDir = resolveSessionStorageDir(() =>
-        resolveDefaultSessionDir({ configDir: ".claude", configDirEnv: "CLAUDE_CONFIG_DIR" }),
+        resolveDefaultSessionDir(CLAUDE_OPTS_LITERAL),
       ).path;
       expect(hooksDir).toBe(adapterDir);
+    }
+  });
+
+  // vscode-copilot is the one platform that diverged for REAL (not just in
+  // theory): VSCodeCopilotAdapter.getSessionDir() used to prefer a
+  // project-local .github/context-mode/sessions dir when a .github directory
+  // existed in cwd, while hooks (VSCODE_OPTS has no configDirEnv) always
+  // resolved ~/.vscode. This is the case that must fail before the fix and
+  // pass after it.
+  it("vscode-copilot: hooks path matches adapter path even when cwd has a .github directory", () => {
+    const root = mkdtempSync(join(tmpdir(), "vscode-github-cwd-"));
+    mkdirSync(join(root, ".github"), { recursive: true });
+    const prevCwd = process.cwd();
+    process.chdir(root);
+    try {
+      const adapterDir = new VSCodeCopilotAdapter().getSessionDir();
+      const hooksDir = resolveSessionStorageDir(() =>
+        resolveDefaultSessionDir({ configDir: VSCODE_OPTS.configDir, configDirEnv: VSCODE_OPTS.configDirEnv }),
+      ).path;
+      expect(hooksDir).toBe(adapterDir);
+    } finally {
+      process.chdir(prevCwd);
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

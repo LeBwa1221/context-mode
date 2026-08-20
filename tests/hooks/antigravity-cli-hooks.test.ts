@@ -16,6 +16,7 @@ import {
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fromAgy } from "../../hooks/antigravity-cli/payload.mjs";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 
 const REPO = resolve(__dirname, "..", "..");
 const SID = "agy-hook-session";
@@ -41,7 +42,9 @@ function dispatch(
 }
 
 function openDB(home: string): Database.Database {
-  const dir = join(home, ".gemini", "context-mode", "sessions");
+  // maint/integration: session storage is the shared global root now, not
+  // ~/.gemini (agy shares the Gemini-family session root historically).
+  const dir = join(resolveContextModeDataRoot(undefined, home), "context-mode", "sessions");
   const file = existsSync(dir) ? readdirSync(dir).find((f) => f.endsWith(".db")) : undefined;
   if (!file) throw new Error("no session DB created");
   return new Database(join(dir, file));

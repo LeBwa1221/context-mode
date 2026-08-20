@@ -6,6 +6,7 @@ import { resolve, join } from "node:path";
 import { mkdirSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { CopilotCliAdapter, copilotCliMcpConfigPath } from "../../src/adapters/copilot-cli/index.js";
 import { HOOK_TYPES, HOOK_SCRIPTS, buildHookCommand } from "../../src/adapters/copilot-cli/hooks.js";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 
 describe("CopilotCliAdapter", () => {
   let adapter: CopilotCliAdapter;
@@ -53,18 +54,20 @@ describe("CopilotCliAdapter", () => {
       );
     });
 
-    it("session dir is under ~/.copilot/context-mode/sessions", () => {
-      const sessionDir = adapter.getSessionDir();
-      expect(sessionDir).toBe(join(homedir(), ".copilot", "context-mode", "sessions"));
+    it("session dir is the shared global root, not ~/.copilot (maint/integration)", () => {
+      // getSessionDir() no longer overrides with a COPILOT_HOME-rooted
+      // fallback - all platforms share BaseAdapter's global default.
+      expect(adapter.getSessionDir()).toBe(join(resolveContextModeDataRoot(), "context-mode", "sessions"));
+      expect(adapter.getSessionDir()).not.toContain(".copilot");
     });
 
-    it("session dir follows COPILOT_HOME so the server and hook runtime agree", () => {
-      // The hook runtime honors COPILOT_HOME (COPILOT_OPTS.configDirEnv); the
-      // server's getSessionDir() must too, or writes and reads diverge.
+    it("COPILOT_HOME no longer affects session storage; CONTEXT_MODE_HOME still wins", () => {
       process.env.COPILOT_HOME = resolve(homedir(), "custom-copilot");
-      expect(adapter.getSessionDir()).toBe(
-        join(resolve(homedir(), "custom-copilot"), "context-mode", "sessions"),
-      );
+      expect(adapter.getSessionDir()).toBe(join(resolveContextModeDataRoot(), "context-mode", "sessions"));
+
+      const override = resolve(homedir(), "custom-ctx-home");
+      process.env.CONTEXT_MODE_HOME = override;
+      expect(adapter.getSessionDir()).toBe(join(override, "context-mode", "sessions"));
     });
   });
 

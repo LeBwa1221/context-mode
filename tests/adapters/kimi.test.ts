@@ -3,9 +3,10 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
 import { KimiAdapter, probeKimiCliVersion } from "../../src/adapters/kimi/index.js";
 import { resolveSessionDbPath, SessionDB } from "../../src/session/db.js";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 
 describe("KimiAdapter", () => {
   let adapter: KimiAdapter;
@@ -447,21 +448,21 @@ command = "context-mode hook kimi posttooluse"
       expect(adapter.getMcpPath()).toBe(join(homedir(), ".kimi-code", "mcp.json"));
     });
 
-    it("session dir is under ~/.kimi-code/context-mode/sessions", () => {
+    it("session dir is the shared global root, not ~/.kimi-code (maint/integration)", () => {
+      // getSessionDir() no longer overrides with a $KIMI_CODE_HOME-rooted
+      // fallback - all platforms share BaseAdapter's global default.
       const dir = adapter.getSessionDir();
-      // Use path.sep — `resolve("/")` returns the cwd's drive root on Windows
-      // (e.g. "D:\\"), producing a nonsense expected string like
-      // ".kimi-codeD:\\context-modeD:\\sessions".
-      expect(dir).toContain(`.kimi-code${sep}context-mode${sep}sessions`);
+      expect(dir).toBe(join(resolveContextModeDataRoot(), "context-mode", "sessions"));
+      expect(dir).not.toContain(".kimi-code");
     });
   });
 
   // ── Session DB integration ────────────────────────────
 
   describe("session DB integration", () => {
-    it("stores sessions in platform-specific directory", () => {
+    it("stores sessions in the shared global directory", () => {
       const dir = adapter.getSessionDir();
-      expect(dir).toContain(".kimi-code");
+      expect(dir).toBe(join(resolveContextModeDataRoot(), "context-mode", "sessions"));
     });
 
     it("resolveSessionDbPath honours getSessionDir", () => {
@@ -469,7 +470,8 @@ command = "context-mode hook kimi posttooluse"
         sessionsDir: adapter.getSessionDir(),
         projectDir: "/tmp/project",
       });
-      expect(dbPath).toContain(".kimi-code");
+      expect(dbPath).toContain("context-mode");
+      expect(dbPath).toContain("sessions");
     });
 
     it("can create and write to a SessionDB in the Kimi session dir", () => {

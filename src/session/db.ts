@@ -14,7 +14,6 @@ import { resolveContextModeDataRoot } from "./data-root.js";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { accessSync, constants, existsSync, mkdirSync, realpathSync, renameSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 // ─────────────────────────────────────────────────────────
@@ -93,45 +92,15 @@ export function resolveDefaultSessionDir(opts: DefaultSessionDirOptions): string
     return legacy;
   }
 
-  // maint/integration (HANDOFF.md item 6): Claude Code hooks used to land in
-  // a profile-scoped ~/<CLAUDE_CONFIG_DIR|.claude>/context-mode/sessions dir
-  // while ClaudeCodeAdapter.getSessionDir() -- which does NOT override
-  // BaseAdapter's default -- already resolved resolveContextModeDataRoot(),
-  // the shared global root. Resolve the SAME root here so Claude Code hooks
-  // and the MCP server never split state again.
-  //
-  // Scoped to configDirEnv === "CLAUDE_CONFIG_DIR" (the two Claude Code call
-  // sites: hooks/session-helpers.mjs's CLAUDE_OPTS and src/server.ts's
-  // ".claude" fallback) on purpose. Every OTHER platform keeps the historical
-  // configDir-based default below: the adapters that DO override
-  // getSessionDir (codex, opencode, vscode-copilot, copilot-cli, kimi)
-  // intentionally fall back to their own ~/.<platform> dir when no
-  // CONTEXT_MODE_HOME/CONTEXT_MODE_DATA_DIR override is set, and unifying
-  // the remaining platforms (gemini-cli, cursor, kiro, jetbrains-copilot,
-  // qwen-code, antigravity, ...) is out of scope for this fix.
-  if (opts.configDirEnv === "CLAUDE_CONFIG_DIR") {
-    return join(resolveContextModeDataRoot(env), "context-mode", "sessions");
-  }
-
-  return join(resolveConfigDirForDefaultSession(opts.configDir, opts.configDirEnv, env), "context-mode", "sessions");
-}
-
-function resolveConfigDirForDefaultSession(
-  configDir: string,
-  configDirEnv: string | undefined,
-  env: NodeJS.ProcessEnv,
-): string {
-  const envValue = configDirEnv ? env[configDirEnv] : undefined;
-  if (envValue && envValue.trim() !== "") {
-    return resolveConfigDirValue(envValue.trim());
-  }
-  return resolveConfigDirValue(configDir, homedir());
-}
-
-function resolveConfigDirValue(value: string, baseDir?: string): string {
-  if (value.startsWith("~")) return resolve(homedir(), value.replace(/^~[/\\]?/, ""));
-  if (isAbsolute(value)) return resolve(value);
-  return baseDir ? resolve(baseDir, value) : resolve(value);
+  // maint/integration (HANDOFF.md item 6): every platform's hooks used to
+  // land in a profile/platform-rooted dir (~/.claude, ~/.codex, ~/.vscode,
+  // .github/, ...) while BaseAdapter.getSessionDir() already resolved
+  // resolveContextModeDataRoot(), the shared global root (no adapter
+  // overrides getSessionDir() anymore - see src/adapters/base.ts).
+  // opts.configDir/configDirEnv are unused now (kept on the type since
+  // callers still pass them); only opts.legacySessionDirEnv/env above still
+  // apply.
+  return join(resolveContextModeDataRoot(env), "context-mode", "sessions");
 }
 
 function invalidStorageOverride(kind: StorageDirectoryKind, path: string, detail: string): StorageDirectoryError {

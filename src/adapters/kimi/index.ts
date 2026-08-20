@@ -9,7 +9,7 @@
  *   - Same wire protocol as Codex CLI (JSON stdin → stdout)
  *   - Config: $KIMI_CODE_HOME or ~/.kimi-code (config.toml + mcp.json)
  *   - Hooks are inline `[[hooks]]` array tables in config.toml
- *   - Session dir: $KIMI_CODE_HOME/context-mode/sessions/
+ *   - Session dir: BaseAdapter's global default (resolveContextModeDataRoot)
  *
  * PreToolUse is deny-only — ask / modify / additionalContext are silently
  * dropped by the host runner (verified upstream at runner.ts:36-39,162-178).
@@ -337,14 +337,10 @@ export class KimiAdapter extends BaseAdapter implements HookAdapter {
     return join(this.getConfigDir(), "mcp.json");
   }
 
-  getSessionDir(): string {
-    const override = resolveContextModeDataRootOverride();
-    const dir = override
-      ? join(override, "context-mode", "sessions")
-      : join(this.getConfigDir(), "context-mode", "sessions");
-    mkdirSync(dir, { recursive: true });
-    return dir;
-  }
+  // maint/integration: getSessionDir() override removed - session storage
+  // now always uses BaseAdapter's global default (resolveContextModeDataRoot,
+  // still honoring CONTEXT_MODE_HOME/CONTEXT_MODE_DATA_DIR). getConfigDir()
+  // (= KIMI_CODE_HOME-aware) is unaffected.
 
   getInstructionFiles(): string[] {
     return ["AGENTS.md", "AGENTS.override.md"];

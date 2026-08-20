@@ -7,7 +7,7 @@
  *   - 6 hook events: PreToolUse, PostToolUse, PreCompact, SessionStart, UserPromptSubmit, Stop
  *   - Same wire protocol as Claude Code (JSON stdin → stdout)
  *   - Config: $CODEX_HOME or ~/.codex (hooks.json + config.toml)
- *   - Session dir: $CODEX_HOME/context-mode/sessions/
+ *   - Session dir: BaseAdapter's global default (resolveContextModeDataRoot)
  *
  * Hook dispatch is stable in Codex CLI. PreToolUse deny decisions work,
  * while input rewriting remains blocked on upstream updatedInput support.
@@ -442,19 +442,11 @@ export class CodexAdapter extends BaseAdapter implements HookAdapter {
     return join(this.getConfigDir(), "config.toml");
   }
 
-  getSessionDir(): string {
-    // Issue #649: honor the context-mode data-root override before falling
-    // back to the $CODEX_HOME-rooted default (preserved so CODEX_HOME
-    // continues to steer session storage the way it always has — parity
-    // with the copilot-cli/kimi/opencode adapters). Settings.toml and
-    // hooks.json continue to live under getConfigDir() unaffected.
-    const override = resolveContextModeDataRootOverride();
-    const dir = override
-      ? join(override, "context-mode", "sessions")
-      : join(this.getConfigDir(), "context-mode", "sessions");
-    mkdirSync(dir, { recursive: true });
-    return dir;
-  }
+  // maint/integration: getSessionDir() override removed - session storage
+  // now always uses BaseAdapter's global default (resolveContextModeDataRoot,
+  // still honoring CONTEXT_MODE_HOME/CONTEXT_MODE_DATA_DIR). The $CODEX_HOME
+  // rooted fallback this used to have is gone; settings.toml and hooks.json
+  // still live under getConfigDir() (= $CODEX_HOME), unaffected.
 
   // C2 narrowing (2026-05): the historical `getSessionDBPath` /
   // `getSessionEventsPath` overrides were removed. Both delegated to the

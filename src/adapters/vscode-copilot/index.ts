@@ -4,7 +4,7 @@
  * Extends CopilotBaseAdapter with VS Code-specific logic:
  *   - extractSessionId: VSCODE_PID fallback
  *   - getProjectDir: CLAUDE_PROJECT_DIR
- *   - getSessionDir: .github/ detection with ~/.vscode/ fallback
+ *   - getSessionDir: BaseAdapter's global default (resolveContextModeDataRoot)
  *   - checkPluginRegistration: reads .vscode/mcp.json
  *   - getInstalledVersion: scans VS Code extensions dir
  *   - validateHooks: preview status + matcher warnings
@@ -12,16 +12,13 @@
 
 import {
   readFileSync,
-  mkdirSync,
   accessSync,
-  existsSync,
   constants,
 } from "node:fs";
 import { resolve, join } from "node:path";
 import { homedir } from "node:os";
 
 import { CopilotBaseAdapter } from "../copilot-base.js";
-import { resolveContextModeDataRootOverride } from "../base.js";
 import type { CopilotHookInput, CopilotHookModule } from "../copilot-base.js";
 
 import type {
@@ -44,8 +41,8 @@ import {
 
 export class VSCodeCopilotAdapter extends CopilotBaseAdapter {
   constructor() {
-    // sessionDirSegments unused — vscode-copilot overrides getSessionDir()
-    // with .github directory detection fallback logic
+    // sessionDirSegments unused — getSessionDir() is BaseAdapter's default,
+    // which ignores sessionDirSegments (uses resolveContextModeDataRoot()).
     super([".vscode"]);
   }
 
@@ -85,32 +82,14 @@ export class VSCodeCopilotAdapter extends CopilotBaseAdapter {
     );
   }
 
-  getSessionDir(): string {
-    // Issue #649: CONTEXT_MODE_DATA_DIR wins over both the .github project
-    // dir and the ~/.vscode fallback so dev-container/CI users can pin
-    // storage to a writable volume regardless of whether a .github tree
-    // happens to exist in cwd.
-    const override = resolveContextModeDataRootOverride();
-    if (override) {
-      const overrideDir = join(override, "context-mode", "sessions");
-      mkdirSync(overrideDir, { recursive: true });
-      return overrideDir;
-    }
-
-    // Prefer .github/context-mode/sessions/ if .github exists,
-    // otherwise fall back to ~/.vscode/context-mode/sessions/
-    const githubDir = resolve(".github", "context-mode", "sessions");
-    const fallbackDir = join(
-      homedir(),
-      ".vscode",
-      "context-mode",
-      "sessions",
-    );
-
-    const dir = existsSync(resolve(".github")) ? githubDir : fallbackDir;
-    mkdirSync(dir, { recursive: true });
-    return dir;
-  }
+  // maint/integration: getSessionDir() override removed. This used to
+  // diverge for real from hooks (VSCODE_OPTS has no configDirEnv, so hooks
+  // always resolved ~/.vscode while this preferred project-local
+  // .github/context-mode/sessions when a .github dir existed) - session
+  // storage now always uses BaseAdapter's global default
+  // (resolveContextModeDataRoot, still honoring CONTEXT_MODE_HOME/
+  // CONTEXT_MODE_DATA_DIR), matching hooks exactly. .github detection stays
+  // in getConfigDir() below, for platform-native config only.
 
   /**
    * VS Code Copilot honors .github/copilot-instructions.md per project.

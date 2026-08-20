@@ -1,9 +1,11 @@
 import "../setup-home";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { resolve, join } from "node:path";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { VSCodeCopilotAdapter } from "../../src/adapters/vscode-copilot/index.js";
 import { HOOK_TYPES, HOOK_SCRIPTS, buildHookCommand } from "../../src/adapters/vscode-copilot/hooks.js";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 
 describe("VSCodeCopilotAdapter", () => {
   let adapter: VSCodeCopilotAdapter;
@@ -199,12 +201,29 @@ describe("VSCodeCopilotAdapter", () => {
       );
     });
 
-    it("session dir is under ~/.vscode/context-mode/sessions/ or .github/", () => {
-      // The adapter uses .github/ if it exists, otherwise ~/.vscode/
-      // We just verify it returns a valid path containing context-mode/sessions
-      const sessionDir = adapter.getSessionDir();
-      expect(sessionDir).toContain("context-mode");
-      expect(sessionDir).toContain("sessions");
+    it("session dir is the shared global root regardless of .github (maint/integration)", () => {
+      // HANDOFF.md item 6: this used to diverge for real - .github/ project
+      // detection when a .github dir existed in cwd, ~/.vscode otherwise -
+      // while hooks (VSCODE_OPTS, no configDirEnv) always resolved
+      // ~/.vscode. getSessionDir() no longer overrides; both now share
+      // BaseAdapter's global default unconditionally.
+      const expected = join(resolveContextModeDataRoot(), "context-mode", "sessions");
+      expect(adapter.getSessionDir()).toBe(expected);
+      expect(adapter.getSessionDir()).not.toContain(".vscode");
+      expect(adapter.getSessionDir()).not.toContain(".github");
+    });
+
+    it("session dir stays the global root even when a .github directory exists in cwd", () => {
+      const root = mkdtempSync(join(tmpdir(), "vscode-github-cwd-"));
+      mkdirSync(join(root, ".github"), { recursive: true });
+      const prevCwd = process.cwd();
+      process.chdir(root);
+      try {
+        expect(adapter.getSessionDir()).toBe(join(resolveContextModeDataRoot(), "context-mode", "sessions"));
+      } finally {
+        process.chdir(prevCwd);
+        rmSync(root, { recursive: true, force: true });
+      }
     });
   });
 

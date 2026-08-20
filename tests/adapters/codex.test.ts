@@ -6,6 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { CodexAdapter, parseCodexContextModePluginRoot, probeCodexCliVersion } from "../../src/adapters/codex/index.js";
 import { resolveSessionDbPath, SessionDB } from "../../src/session/db.js";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 
 function writeCodexPluginManifest(pluginRoot: string): void {
   const pluginDir = join(pluginRoot, ".codex-plugin");
@@ -298,12 +299,14 @@ describe("CodexAdapter", () => {
       expect(adapter.getSettingsPath()).toContain("config.toml");
     });
 
-    it("session dir is under ~/.codex/context-mode/sessions/", () => {
-      expect(adapter.getSessionDir()).toContain(".codex");
-      expect(adapter.getSessionDir()).toContain("sessions");
+    it("session dir is the shared global root, not ~/.codex (maint/integration)", () => {
+      // getSessionDir() no longer overrides with a $CODEX_HOME-rooted
+      // fallback - all platforms share BaseAdapter's global default.
+      expect(adapter.getSessionDir()).toBe(join(resolveContextModeDataRoot(), "context-mode", "sessions"));
+      expect(adapter.getSessionDir()).not.toContain(".codex");
     });
 
-    it("honors CODEX_HOME for settings, hooks, and session paths", () => {
+    it("CODEX_HOME still relocates settings/hooks but no longer session storage", () => {
       const savedCodexHome = process.env.CODEX_HOME;
       const codexHome = join(homedir(), "custom-codex-home");
       process.env.CODEX_HOME = codexHome;
@@ -316,11 +319,26 @@ describe("CodexAdapter", () => {
         });
         expect(customAdapter.getSettingsPath()).toBe(join(codexHome, "config.toml"));
         expect(customAdapter.getHooksPath()).toBe(join(codexHome, "hooks.json"));
-        expect(customAdapter.getSessionDir()).toBe(join(codexHome, "context-mode", "sessions"));
+        // Session storage ignores CODEX_HOME now - only CONTEXT_MODE_HOME/
+        // CONTEXT_MODE_DATA_DIR relocate it (issue #649's actual rationale).
+        expect(customAdapter.getSessionDir()).toBe(join(resolveContextModeDataRoot(), "context-mode", "sessions"));
       } finally {
         if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
         else process.env.CODEX_HOME = savedCodexHome;
         rmSync(codexHome, { recursive: true, force: true });
+      }
+    });
+
+    it("CONTEXT_MODE_HOME still wins for session storage", () => {
+      const saved = process.env.CONTEXT_MODE_HOME;
+      const override = join(homedir(), "custom-ctx-home");
+      process.env.CONTEXT_MODE_HOME = override;
+      try {
+        expect(adapter.getSessionDir()).toBe(join(override, "context-mode", "sessions"));
+      } finally {
+        if (saved === undefined) delete process.env.CONTEXT_MODE_HOME;
+        else process.env.CONTEXT_MODE_HOME = saved;
+        rmSync(override, { recursive: true, force: true });
       }
     });
   });

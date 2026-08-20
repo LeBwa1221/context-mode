@@ -9,9 +9,10 @@ import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdtempSync, rmSync, existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { tmpdir, homedir } from "node:os";
+import { tmpdir } from "node:os";
 import { fakeHome, realHome } from "../setup-home";
 import { resetGuidanceThrottle } from "../../hooks/core/routing.mjs";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 
 
 const _hashCanonical = (p: string) => createHash("sha256").update(
@@ -52,7 +53,9 @@ describe("Cursor hooks", () => {
   beforeAll(() => {
     tempDir = mkdtempSync(join(tmpdir(), "cursor-hook-test-"));
     const hash = _hashCanonical(tempDir);
-    const sessionsDir = join(homedir(), ".cursor", "context-mode", "sessions");
+    // maint/integration: session storage is the shared global root now, not
+    // ~/.cursor.
+    const sessionsDir = join(resolveContextModeDataRoot(), "context-mode", "sessions");
     dbPath = join(sessionsDir, `${hash}.db`);
     eventsPath = join(sessionsDir, `${hash}-events.md`);
     realDbPath = join(realHome, ".cursor", "context-mode", "sessions", `${hash}.db`);
@@ -375,7 +378,9 @@ describe("Cursor hooks — MCP cwd != hook projectDir worktree-suffix (#435)", (
     // existsSync assertion is vacuously false.
     const mcpHash = _hashCanonical(mcpDir.replace(/\\/g, "/"));
     const wtHash = _hashCanonical(worktreeDir.replace(/\\/g, "/"));
-    const sessionsDir = join(homedir(), ".cursor", "context-mode", "sessions");
+    // maint/integration: session storage is the shared global root now, not
+    // ~/.cursor.
+    const sessionsDir = join(resolveContextModeDataRoot(), "context-mode", "sessions");
     mcpDbPath = join(sessionsDir, `${mcpHash}.db`);
     worktreeDbPath = join(sessionsDir, `${wtHash}.db`);
   });

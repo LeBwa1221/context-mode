@@ -23,7 +23,6 @@ import { dirname, join, resolve } from "node:path";
 
 import { CopilotBaseAdapter } from "../copilot-base.js";
 import type { CopilotHookInput, CopilotHookModule } from "../copilot-base.js";
-import { resolveContextModeDataRootOverride } from "../base.js";
 import { parseJsonc } from "../../util/jsonc.js";
 import type {
   DiagnosticResult,
@@ -162,20 +161,10 @@ export class CopilotCliAdapter extends CopilotBaseAdapter {
     return copilotCliHome();
   }
 
-  getSessionDir(): string {
-    // Parity with codex/kimi: honor CONTEXT_MODE_DATA_DIR first, else root
-    // session storage at getConfigDir() (= copilotCliHome(), COPILOT_HOME-aware)
-    // so the TS server reads sessions from the SAME place the hook runtime
-    // (COPILOT_OPTS configDirEnv: "COPILOT_HOME") writes them. Without this, a
-    // relocated COPILOT_HOME splits hook writes ($COPILOT_HOME/...) from server
-    // reads (~/.copilot/...) and sessions appear empty/orphaned.
-    const override = resolveContextModeDataRootOverride();
-    const dir = override
-      ? join(override, "context-mode", "sessions")
-      : join(this.getConfigDir(), "context-mode", "sessions");
-    mkdirSync(dir, { recursive: true });
-    return dir;
-  }
+  // maint/integration: getSessionDir() override removed - session storage
+  // now always uses BaseAdapter's global default (resolveContextModeDataRoot,
+  // still honoring CONTEXT_MODE_HOME/CONTEXT_MODE_DATA_DIR). getConfigDir()
+  // (= copilotCliHome(), COPILOT_HOME-aware) is unaffected.
 
   getInstructionFiles(): string[] {
     return [".github/copilot-instructions.md", "AGENTS.md"];
