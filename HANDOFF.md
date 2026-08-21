@@ -81,10 +81,21 @@ resolved path, but it's not confirmed the stale-PATH half was fixed too - dedupi
 stale paths still reads the wrong directory if so. This is untouched; do not assume
 it was fixed as a side effect of anything else done in this history.
 
-### 5. `f*.tmp` test-leak cleanup
-`f0.tmp`/`f1.tmp`/`f2.tmp` regenerate at the worktree root on every `npm run build`,
-leaking from `tests/core/server.test.ts`. Never tracked, safe to delete, but the
-leak itself is still not fixed.
+### 5. `f*.tmp` test-leak cleanup - FIXED 2026-08-21
+Root cause found and fixed: `tests/executor.test.ts` ("Temp Cleanup Resilience >
+concurrent executions all return valid results (EBUSY resilience)"), not
+`tests/core/server.test.ts` as previously believed. That test ran JS code writing
+`f0.tmp`/`f1.tmp`/`f2.tmp` via `process.cwd()`, and the default `executor` in that
+file has no `projectRoot` override, so `PolyglotExecutor` (by design, Issue #788 -
+every language runs with cwd = project root unless a `cwd` override is passed)
+resolved that to the repo root. Confirmed empirically: `npm run build` alone does
+NOT regenerate the files; `npx vitest run tests/executor.test.ts` does. Fixed by
+passing `cwd: scratch` (a `mkdtempSync(join(tmpdir(), "ctx-ebusy-test-"))` dir,
+same pattern used elsewhere in the file) into the `executor.execute` calls, with
+`rmSync(scratch, { recursive: true, force: true })` in a `finally`. `text.txt` and
+`baseline.xml` at the repo root are unrelated - manual redirected output from a
+`merge-stores` dry run and a PowerShell session-stats snapshot, with no in-repo
+generator writing those literal filenames; left alone.
 
 ### 6. Hook vs server store-root divergence - real session data lands in the profile dir
 
