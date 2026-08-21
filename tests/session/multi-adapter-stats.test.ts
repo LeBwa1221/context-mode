@@ -393,9 +393,11 @@ describe("maint/global-store — no double-count when adapters share a dir", () 
 // maint/global-store — project-level dedup between a legacy adapter dir and
 // the new global root. adoptLargestLegacyDb() COPIES a project's DB forward
 // (never deletes the original), so the SAME <hash>.db filename can exist in
-// both places for a migrated project. The global copy is a strict superset
-// (only it receives new writes post-migration), so it must win — counting
-// both would double a migrated project's entire history.
+// both places for a migrated project. Counting both would double a migrated
+// project's history, so exactly one copy must be counted — but which copy
+// is authoritative is NOT assumed from location (that assumption was
+// measured false; see the phase 3 test below). It's decided by comparing
+// actual row counts.
 describe("maint/global-store — project-level dedup (legacy vs global root copy)", () => {
   function globalSessionsDirFor(home: string): string {
     return join(resolveContextModeDataRoot(process.env, home), "context-mode", "sessions");
@@ -445,6 +447,39 @@ describe("maint/global-store — project-level dedup (legacy vs global root copy
     const cc = r.perAdapter.find((a) => a.name === "claude-code")!;
     expect(cc).toBeDefined();
     expect(cc.eventCount).toBe(1);
+  });
+
+  test("counts the legacy copy, not the global one, when the global copy is NOT a superset (phase 3 false-invariant fix)", () => {
+    // Measured false in the wild (docs/plan-store-unification.md phase 3):
+    // a legacy profile store can have MORE events than the global root, e.g.
+    // when adoption copied forward a smaller profile's file, or a legacy
+    // client kept writing after migration. Blindly trusting the global copy
+    // would under-count this project's history; blindly summing both would
+    // double-count the events the two copies share. Counting by actual row
+    // count picks the copy with more events (legacy, here) and excludes the
+    // other, giving neither an under-count nor a double-count.
+    const home = tmpHome();
+    const legacySessions = ensureDir(join(home, ".claude", "context-mode", "sessions"));
+    const globalSessions = ensureDir(globalSessionsDirFor(home));
+    const hash = "abcdefabcdefabcd";
+
+    seed(dbPathFor(globalSessions, hash), `global-${randomUUID()}`, [
+      { type: "tool_use", category: "file", data: "g-a", projectDir: "/p/diverged" },
+    ]);
+    seed(dbPathFor(legacySessions, hash), `legacy-${randomUUID()}`, [
+      { type: "tool_use", category: "file", data: "l-a", projectDir: "/p/diverged" },
+      { type: "tool_use", category: "file", data: "l-b", projectDir: "/p/diverged" },
+      { type: "tool_use", category: "file", data: "l-c", projectDir: "/p/diverged" },
+    ]);
+
+    const r = getMultiAdapterLifetimeStats({ home, claudeConfigDir: join(home, ".claude") });
+
+    expect(r.totalEvents).toBe(3); // the larger (legacy) copy, counted once
+
+    const cc = r.perAdapter.find((a) => a.name === "claude-code")!;
+    const global = r.perAdapter.find((a) => a.name === "context-mode")!;
+    expect(cc.eventCount).toBe(3);
+    expect(global.eventCount).toBe(0);
   });
 
   test("getMultiAdapterRealBytesStats also prefers the global copy for a migrated project", () => {

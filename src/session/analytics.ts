@@ -655,8 +655,8 @@ export interface AdapterDirEntry {
  * (paths still differ, so dedupeAdapterDirsByPath leaves both entries).
  * The aggregators (`getMultiAdapterLifetimeStats`,
  * `getMultiAdapterRealBytesStats`) resolve it one level deeper, at the
- * per-project-DB-filename level, via `listMigratedProjectFiles` — see its
- * doc comment for why the global copy always wins.
+ * per-project-DB-filename level, via `resolveAuthoritativeProjectFiles` —
+ * see its doc comment for how the winning copy is chosen.
  *
  * Returns every legacy adapter even when the dir doesn't exist on disk —
  * the scanner functions filter to existing dirs. That keeps the
@@ -1263,7 +1263,7 @@ export function getRealBytesStats(opts: {
    */
   contentDbPath?: string;
   loadDatabase?: () => unknown;
-  /** Project-DB filenames to skip — see listMigratedProjectFiles' doc comment. */
+  /** Project-DB filenames to skip — see resolveAuthoritativeProjectFiles' doc comment. */
   excludeFiles?: ReadonlySet<string>;
 }): RealBytesStats {
   const empty: RealBytesStats = {
@@ -1578,12 +1578,9 @@ function scanOneAdapter(
   loadDb: () => unknown,
   filter: Required<Omit<RealUsageFilter, "nowMs">> & { nowMs: number },
   /**
-   * Project-DB filenames to skip in this dir because the global root
-   * (resolveContextModeDataRoot) already has a copy — see
-   * dedupeMigratedProjectFiles's doc comment. `adoptLargestLegacyDb` only
-   * ever COPIES forward, never back, so the global copy is a strict
-   * superset of any legacy one; counting the legacy copy too would
-   * double the migrated project's entire history.
+   * Project-DB filenames to skip in this dir — the same filename has a
+   * copy in another adapter dir that {@link resolveAuthoritativeProjectFiles}
+   * determined (by actual row count) is the one to count instead.
    */
   excludeFiles?: ReadonlySet<string>,
 ): AdapterScanResult {
@@ -1702,31 +1699,107 @@ export interface MultiAdapterLifetimeStats {
 }
 
 /**
- * Project-DB filenames (`<hash>.db`) already present under the global root
- * (the "context-mode" entry from enumerateAdapterDirs). `adoptLargestLegacyDb`
- * (src/db-base.ts) only ever COPIES a legacy DB forward into the global
- * root, never deletes the original, and only the global root receives new
- * writes after that. So for any project hash present in BOTH the global
- * root and a legacy dir, the global copy is a strict superset — legacy
- * scans must skip that filename or the project's entire history counts
- * twice (the same class of bug enumerateAdapterDirs' directory-level dedup
- * just fixed, reintroduced one level deeper).
+ * Decide, per project-DB filename (`<hash>.db`), which adapter dir's copy
+ * to count when the SAME filename exists in more than one dir. Returns a
+ * map from adapter `name` to the set of filenames that dir must EXCLUDE
+ * (because a different dir holds the copy actually being counted).
  *
- * Edge case, decided deliberately rather than left implicit: if a legacy
- * file is somehow larger than the global copy (adoption picked a
- * different profile's file; a legacy client kept writing post-migration),
- * the global copy still wins. A size heuristic would make totals
- * non-deterministic across runs — worse than being wrong the same way
- * every time.
+ * Does NOT assume the global root ("context-mode" entry) is a strict
+ * superset of any legacy copy. That assumption was measured false in the
+ * wild (docs/plan-store-unification.md phase 3: global had 1739
+ * session_events for one project, a legacy profile store had 2503) and can
+ * never be enforced at runtime anyway — a fresh install upgrading from a
+ * per-profile layout, or any machine `scripts/merge-stores.ts` hasn't run
+ * on yet, has legacy stores that are NOT subsets of global. Instead, this
+ * counts `session_events` rows for every copy of a shared filename and
+ * keeps whichever copy actually has the most rows, so aggregate stats
+ * never double-count (only one copy is ever counted) and never
+ * under-count relative to trusting file location (the largest real copy,
+ * wherever it lives, is the one kept) — correct regardless of whether a
+ * migration has run.
+ *
+ * Scoped to pairs involving the global "context-mode" entry only: that's
+ * the only entry `adoptLargestLegacyDb` can have copied another dir's file
+ * into. Two non-global legacy dirs sharing a filename is a genuine
+ * coincidence (the same project used via two different tools before
+ * unification, each with its own distinct history), not a duplicate — both
+ * are counted, summed, same as before.
  */
-function listMigratedProjectFiles(dirs: AdapterDirEntry[]): ReadonlySet<string> {
-  const globalEntry = dirs.find((d) => d.name === "context-mode");
-  if (!globalEntry || !existsSync(globalEntry.sessionsDir)) return new Set();
-  try {
-    return new Set(readdirSync(globalEntry.sessionsDir).filter((f) => f.endsWith(".db")));
-  } catch {
-    return new Set();
+function resolveAuthoritativeProjectFiles(
+  dirs: AdapterDirEntry[],
+  loadDb: () => unknown,
+): ReadonlyMap<string, ReadonlySet<string>> {
+  const byFile = new Map<string, Array<{ dirName: string; path: string }>>();
+  for (const dir of dirs) {
+    if (!existsSync(dir.sessionsDir)) continue;
+    let files: string[];
+    try {
+      files = readdirSync(dir.sessionsDir).filter((f) => f.endsWith(".db"));
+    } catch {
+      continue;
+    }
+    for (const f of files) {
+      const arr = byFile.get(f) ?? [];
+      arr.push({ dirName: dir.name, path: join(dir.sessionsDir, f) });
+      byFile.set(f, arr);
+    }
   }
+
+  const excludeByDir = new Map<string, Set<string>>();
+  const exclude = (dirName: string, file: string) => {
+    const set = excludeByDir.get(dirName) ?? new Set<string>();
+    set.add(file);
+    excludeByDir.set(dirName, set);
+  };
+
+  for (const [file, copies] of byFile) {
+    if (copies.length <= 1) continue; // no duplicate — nothing to arbitrate
+    // Only the "context-mode" global root can be a COPY of another entry's
+    // data (adoptLargestLegacyDb only ever copies a legacy file forward
+    // into the global root). Two non-global adapter dirs sharing a filename
+    // is a real coincidence (the same project opened via two different
+    // tools before unification, each with its own distinct history) — not
+    // a duplicate, so nothing to arbitrate between them.
+    if (!copies.some((c) => c.dirName === "context-mode")) continue;
+
+    let DatabaseCtor: ReturnType<typeof loadDatabaseImpl> | null = null;
+    try {
+      DatabaseCtor = loadDb() as ReturnType<typeof loadDatabaseImpl>;
+    } catch {
+      DatabaseCtor = null;
+    }
+
+    let winner = copies[0];
+    let winnerCount = -1;
+    for (const copy of copies) {
+      let count = 0;
+      if (DatabaseCtor) {
+        try {
+          const sdb = new DatabaseCtor(copy.path, { readonly: true });
+          try {
+            const row = sdb.prepare("SELECT COUNT(*) AS cnt FROM session_events").get() as
+              | { cnt: number }
+              | undefined;
+            count = Number(row?.cnt ?? 0);
+          } finally {
+            sdb.close();
+          }
+        } catch {
+          count = 0; // corrupt/unreadable copy loses the arbitration, not the whole scan
+        }
+      }
+      if (count > winnerCount) {
+        winnerCount = count;
+        winner = copy;
+      }
+    }
+
+    for (const copy of copies) {
+      if (copy.dirName !== winner.dirName) exclude(copy.dirName, file);
+    }
+  }
+
+  return excludeByDir;
 }
 
 /**
@@ -1748,7 +1821,7 @@ export function getMultiAdapterLifetimeStats(opts?: {
     ...(opts?.filter ?? {}),
     nowMs: opts?.filter?.nowMs ?? Date.now(),
   };
-  const migrated = listMigratedProjectFiles(dirs);
+  const excludeByDir = resolveAuthoritativeProjectFiles(dirs, loadDb);
 
   const perAdapter: AdapterScanResult[] = [];
   let totalEvents = 0;
@@ -1757,7 +1830,7 @@ export function getMultiAdapterLifetimeStats(opts?: {
 
   for (const entry of dirs) {
     if (!existsSync(entry.sessionsDir)) continue; // only surface adapters with a sessions dir
-    const r = scanOneAdapter(entry, loadDb, filter, entry.name === "context-mode" ? undefined : migrated);
+    const r = scanOneAdapter(entry, loadDb, filter, excludeByDir.get(entry.name));
     perAdapter.push(r);
     totalEvents   += r.eventCount;
     totalSessions += r.sessionCount;
@@ -1787,7 +1860,8 @@ export function getMultiAdapterRealBytesStats(opts?: {
   loadDatabase?: () => unknown;
 }): MultiAdapterRealBytesStats {
   const dirs = enumerateAdapterDirs({ home: opts?.home, claudeConfigDir: opts?.claudeConfigDir });
-  const migrated = listMigratedProjectFiles(dirs);
+  const loadDb = opts?.loadDatabase ?? loadDatabaseImpl;
+  const excludeByDir = resolveAuthoritativeProjectFiles(dirs, loadDb);
 
   const sum: RealBytesStats = {
     eventDataBytes: 0,
@@ -1806,7 +1880,7 @@ export function getMultiAdapterRealBytesStats(opts?: {
       sessionId: opts?.sessionId,
       worktreeHash: opts?.worktreeHash,
       loadDatabase: opts?.loadDatabase,
-      excludeFiles: entry.name === "context-mode" ? undefined : migrated,
+      excludeFiles: excludeByDir.get(entry.name),
     });
     // ARCH-REVIEW-V134-ABC SLICE C: aggregate this adapter's content DB
     // bytes into the lifetime sum. `getRealBytesStats` operates on
