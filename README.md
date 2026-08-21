@@ -1622,7 +1622,7 @@ That blocks loopback + RFC1918 + ULA in addition to the always-blocked ranges. U
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and TDD guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and TDD guidelines. context-mode uses npm; use `npm ci` instead of `npm install` for a reproducible install straight from `package-lock.json`.
 
 ```bash
 git clone https://github.com/mksglu/context-mode.git

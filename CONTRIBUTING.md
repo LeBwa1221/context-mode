@@ -94,12 +94,16 @@ Both SessionDB and ContentStore are **multi-writer-safe**. Two processes may ope
 
 ### 1. Clone and install
 
+context-mode uses npm; `package-lock.json` is tracked and is the source of truth for dependency versions.
+
 ```bash
 git clone https://github.com/mksglu/context-mode.git
 cd context-mode
 npm install
 npm run build  # tsc compiles src/ → build/
 ```
+
+For a reproducible install strictly from the lockfile (what CI runs), use `npm ci` instead of `npm install`.
 
 ### 2. Symlink the cache to your local clone
 

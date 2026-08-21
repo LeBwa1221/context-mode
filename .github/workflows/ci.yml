@@ -44,7 +44,7 @@ jobs:
         run: choco install elixir --yes --no-progress
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Typecheck
         run: npx tsc -b --noEmit
