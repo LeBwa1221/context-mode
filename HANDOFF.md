@@ -353,6 +353,30 @@ Not related to items 1 to 8. The other two commits on `next` (`c94e8fc` and its
 same-day revert `e1d9448`) concern upstream's hosted billing bridge, which this fork
 does not have.
 
+Update 2026-08-21: `0ce043f` has been adopted. It cherry-picked cleanly as `fc7cfaa`,
+with bundles rebuilt in `1c0dd5b`. Its test `tests/core/fetch-shell-detection.test.ts`
+passes 16/16 here.
+
+Thresholds as implemented: `SHELL_MAX_TEXT_BYTES = 200`, `SHELL_MAX_YIELD = 0.02`,
+flagging a shell only when BOTH hold. Checked by arithmetic, not by re-fetching:
+
+- excalidraw.com: 21 bytes of markdown from 6862 bytes of source is a 0.31 percent
+  yield.
+- developer.apple.com/documentation/swiftui/view: 36 bytes from 17486 is a 0.21
+  percent yield.
+
+Both are now under the 200-byte floor and the 2 percent yield floor, so both return
+`fetch_error` with reason `shell` instead of reporting success.
+
+STILL OPEN: this makes the failure honest, it does NOT retrieve the page. `8476db7`
+(the `.md`-sibling and `llms.txt` ladder) is what actually recovers the Apple page,
+and it depends on `5b9c00c`'s block-classification engine. Both remain deliberate
+ports against our diverged store patterns, NOT cherry-picks - `git merge-tree` still
+reports conflicts in `src/server.ts` and `server.bundle.mjs`.
+
+`e31360d` (tool-description rewording) is deliberately skipped: it describes a
+fetch ladder we do not have.
+
 ## Standing warning: re-measure, do not trust prior numbers
 
 Every number and every "regression" label recorded in this history's past sessions
