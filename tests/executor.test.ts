@@ -1710,29 +1710,35 @@ describe("Edge Cases", () => {
 
 describe("Temp Cleanup Resilience", () => {
   test("concurrent executions all return valid results (EBUSY resilience)", async () => {
-    const count = 15;
-    const promises = Array.from({ length: count }, (_, i) =>
-      executor.execute({
-        language: "javascript",
-        code: `
-          const fs = require('fs');
-          const path = require('path');
-          for (let j = 0; j < 3; j++) {
-            fs.writeFileSync(path.join(process.cwd(), 'f' + j + '.tmp'), 'data');
-          }
-          console.log("ok-${i}");
-        `,
-      }),
-    );
-    const results = await Promise.all(promises);
-    for (let i = 0; i < results.length; i++) {
-      const r = results[i];
-      assert.equal(typeof r.exitCode, "number", `Execution ${i}: exitCode not a number`);
-      assert.equal(typeof r.stdout, "string", `Execution ${i}: stdout not a string`);
-      assert.equal(typeof r.stderr, "string", `Execution ${i}: stderr not a string`);
-      assert.equal(typeof r.timedOut, "boolean", `Execution ${i}: timedOut not a boolean`);
-      assert.equal(r.exitCode, 0, `Execution ${i} failed with stderr: ${r.stderr}`);
-      assert.ok(r.stdout.includes(`ok-${i}`), `Missing output for execution ${i}`);
+    const scratch = mkdtempSync(join(tmpdir(), "ctx-ebusy-test-"));
+    try {
+      const count = 15;
+      const promises = Array.from({ length: count }, (_, i) =>
+        executor.execute({
+          language: "javascript",
+          cwd: scratch,
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            for (let j = 0; j < 3; j++) {
+              fs.writeFileSync(path.join(process.cwd(), 'f' + j + '.tmp'), 'data');
+            }
+            console.log("ok-${i}");
+          `,
+        }),
+      );
+      const results = await Promise.all(promises);
+      for (let i = 0; i < results.length; i++) {
+        const r = results[i];
+        assert.equal(typeof r.exitCode, "number", `Execution ${i}: exitCode not a number`);
+        assert.equal(typeof r.stdout, "string", `Execution ${i}: stdout not a string`);
+        assert.equal(typeof r.stderr, "string", `Execution ${i}: stderr not a string`);
+        assert.equal(typeof r.timedOut, "boolean", `Execution ${i}: timedOut not a boolean`);
+        assert.equal(r.exitCode, 0, `Execution ${i} failed with stderr: ${r.stderr}`);
+        assert.ok(r.stdout.includes(`ok-${i}`), `Missing output for execution ${i}`);
+      }
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
     }
   });
 
