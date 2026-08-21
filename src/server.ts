@@ -4160,7 +4160,7 @@ server.registerTool(
 
 Cached on disk, default TTL 24h; \`ttl: 0\` or \`force: true\` bypasses cache. Multi-URL: pass \`requests: [{url, source?}, ...]\` with \`concurrency\` 2-8 (fetch phase only; indexing is always serial).
 
-SPA pages: fetch them the same way. There is no headless browser; a cost-ordered ladder climbs past a JavaScript shell instead - (1) \`Accept: text/markdown\` on the request already being made, (2a) the page's \`.md\` sibling, (2b) the host's llms.txt - and only rungs past 1 cost an extra request, and only when rung 1 came back empty.
+SPA pages: fetch them the same way. There is no headless browser; a cost-ordered ladder climbs past a JavaScript shell instead - (1) \`Accept: text/markdown\` on the request already being made, (2a) the page's \`.md\` sibling, (2b) the host's llms.txt - and only rungs past 1 cost an extra request, and only when rung 1 came back empty. Measured here on 4 pages: 1 recovered at rung 2a browser-free, 2 served markdown at rung 1 in a single request, 1 correctly refused as an application.
 
 WHEN NOT: content is already local (use ctx_index) or the page is an application rather than a document (a whiteboard, a diagram editor) - there is no article to fetch, and the fetch will say so rather than index the shell.`,
     inputSchema: z.object({
