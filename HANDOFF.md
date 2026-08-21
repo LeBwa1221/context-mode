@@ -36,14 +36,23 @@ liveness probe before unlink or an owner-pidfile scheme. Stale-cleanup deleting 
 live-but-idle session is a data-loss bug and matters MORE for our shared global
 store than it does upstream. Do not record this as fixed.
 
-**Safety backup exists because of this risk:** `C:\Projects\_store-backup-20260818\`
-is a copy of the legacy profile store
-(`C:\Users\denys.skrypnyk\.claude-devcom\context-mode\`), taken 2026-08-18 including
-`-wal`/`-shm` sidecars (a bare `.db` copy taken mid-write can be torn; db+wal is
-recoverable). Verified 142 files, 126,158,750 bytes, aggregate MD5 across all `.db`
-files `4ee877970681ef05f301e7c9c239c1bf`, identical on both sides. It protects
-against accidental deletion and against exactly the #1024 stale-cleanup risk, but it
-is on the SAME DISK as the original - not protection against disk loss.
+**Verified 2026-08-21** against `origin/main` at commit `172e703`: upstream has
+NOT fixed #1024. Evidence: `main` is 126 commits ahead of `origin/main` and only
+3 behind, and those 3 are all `ci: update install stats` touching only
+`stats.json`. Merge-base is `62684cf` (2026-08-18). Three targeted searches over
+`main..origin/main` all returned empty:
+`git log --oneline main..origin/main -- src/session/db.ts src/adapters/base.ts src/db-base.ts`,
+`git log --oneline --grep="store" --grep="root" --grep="global" --grep="profile" -i main..origin/main`,
+`git log --oneline --grep="1024" --grep="stale" --grep="liveness" -i main..origin/main`.
+Consequence: there is no competing upstream fix to reconcile, and the retention
+condition for the safety backup below is unchanged.
+
+**Safety backup exists because of this risk.** The original backup at
+`C:\Projects\_store-backup-20260818\` was DELETED on 2026-08-20 as superseded.
+The current safety backup is `C:\Projects\_store-backup-20260820-premerge\`
+(5457 files, 670 MB), taken immediately before the phase 2 store migration
+(migration ran 2026-08-21). Retain it until at least one week of clean use
+post-migration.
 **Do NOT delete the legacy `.claude-devcom` store until the main projects have been
 reopened under the fork and the data confirmed adopted** into the global store
 (adoption is lazy, fires on first open of each project - see `adoptLargestLegacyDb`
