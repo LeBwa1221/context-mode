@@ -285,6 +285,37 @@ describe("adoptLargestLegacyDb", () => {
     expect(existsSync(big)).toBe(true);
   });
 
+  it("warns about discarded candidates when more than one legacy DB exists", () => {
+    const fileName = "warn-multi.db";
+    const small = makeLegacyDb(".claude-observix", "content", fileName, "x".repeat(10));
+    const big = makeLegacyDb(".claude-devcom", "content", fileName, "x".repeat(1000));
+
+    const newDir = tempDir("ctx-global-warn-multi-");
+    const newDbPath = join(newDir, fileName);
+    const messages: string[] = [];
+
+    adoptLargestLegacyDb({ newDbPath, subdir: "content", fileName, log: (m) => messages.push(m) });
+
+    const warning = messages.find((m) => m.includes("multiple legacy DBs"));
+    expect(warning).toBeDefined();
+    expect(warning).toContain(big);
+    expect(warning).toContain(small);
+    expect(warning).toContain("scripts/merge-stores.ts");
+  });
+
+  it("does not warn when only a single legacy DB exists", () => {
+    const fileName = "warn-single.db";
+    makeLegacyDb(".claude-devcom", "content", fileName, "ONLY-ONE");
+
+    const newDir = tempDir("ctx-global-warn-single-");
+    const newDbPath = join(newDir, fileName);
+    const messages: string[] = [];
+
+    adoptLargestLegacyDb({ newDbPath, subdir: "content", fileName, log: (m) => messages.push(m) });
+
+    expect(messages.some((m) => m.includes("multiple legacy DBs"))).toBe(false);
+  });
+
   it("copies WAL/SHM sidecars alongside the adopted main file", () => {
     const fileName = "withwal.db";
     const main = makeLegacyDb(".claude-devcom", "content", fileName, "MAIN");

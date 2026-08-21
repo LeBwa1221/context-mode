@@ -796,7 +796,7 @@ export function adoptLargestLegacyDb(opts: {
     candidates.push(join(home, ...segments, "context-mode", subdir, fileName));
   }
 
-  let best: { path: string; size: number } | null = null;
+  const found: Array<{ path: string; size: number }> = [];
   for (const candidate of candidates) {
     let st;
     try {
@@ -805,9 +805,26 @@ export function adoptLargestLegacyDb(opts: {
       continue; // not present under this legacy root
     }
     if (!st.isFile()) continue;
-    if (!best || st.size > best.size) best = { path: candidate, size: st.size };
+    found.push({ path: candidate, size: st.size });
   }
-  if (!best) return false;
+  if (found.length === 0) return false;
+
+  let best = found[0];
+  for (const candidate of found) {
+    if (candidate.size > best.size) best = candidate;
+  }
+
+  // More than one legacy copy exists for this project: the largest-wins
+  // adoption below silently discards the rest, which is exactly the kind of
+  // divergence that went unnoticed for months (see
+  // docs/plan-store-unification.md). Surface it so it isn't invisible again.
+  if (found.length > 1) {
+    const discarded = found.filter((c) => c.path !== best.path).map((c) => `${c.path} (${c.size} bytes)`);
+    log?.(
+      `context-mode: multiple legacy DBs found for ${fileName} - adopting ${best.path} (${best.size} bytes), ` +
+        `NOT adopting: ${discarded.join(", ")}. Run scripts/merge-stores.ts to merge them instead of discarding.`,
+    );
+  }
 
   try {
     mkdirSync(dirname(newDbPath), { recursive: true });
