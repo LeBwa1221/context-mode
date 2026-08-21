@@ -425,6 +425,65 @@ label (the `#stmtDeleteSourcesByLabel` dedup path), there is no exposed
 per-source deletion command. Add one before relying on being able to clean up
 a bad index entry.
 
+End-to-end verification, 2026-08-21: the ported ladder was exercised against
+real pages using an ISOLATED scratch store (`CONTEXT_MODE_HOME` pointed at a
+temp dir, redirection proven before any fetch). Live-store file counts were
+unchanged at 2019 content / 3018 sessions before and after.
+
+    https://developer.apple.com/documentation/swiftui/view
+      rung 2a, 5593 bytes of real article (protocol description, code samples,
+      Topics). This is the page that returned 36 bytes and reported success
+      before the port.
+    https://excalidraw.com/
+      refused, with a diagnosis: 21 bytes of text from 6862 received, 0.31
+      percent yield. Nothing indexed. Correct - it is an application, not a
+      document.
+    https://docs.stripe.com/api/charges/object
+      rung 1, 11688 bytes, ONE request.
+    https://resend.com/docs/introduction
+      rung 1, 32797 bytes, ONE request.
+
+Two caveats on the above, recorded honestly:
+
+- The Resend preview is dominated by JSX icon-component source before any
+  prose. This is legitimate site-authored markdown served at rung 1, not a
+  misclassification, but it was not confirmed from a 3 KB preview whether the
+  introduction prose sits deeper in the 32 KB indexed document.
+- Request counts were inferred from the rung labels in each response, not
+  instrumented directly.
+
+### 10. Upstream 8476db7 deletes two shipped fixes - do not merge it wholesale
+
+Found 2026-08-21 while porting the fetch ladder. Upstream's `8476db7` on `origin/next`
+carries two deletions its commit message never mentions. Both remove fixes that exist
+on BOTH branches, inherited from the shared ancestor `589d821` (v1.0.169):
+
+- The `appendRetrievalBytes` bridge is removed from `src/server.ts`, including the
+  comment explaining why it exists: the PostToolUse hook never fires for the plugin's
+  own MCP tools, so `bytes_retrieved` read 0 of 124454 in production. Introduced by
+  `320ed3e`.
+- `getConversationWindowStats` is reverted to the older `projectDirForSid` call shape,
+  which the fix's own comment documents as crediting the whole worktree's kept-out
+  bytes while counting only one session's retrieval. Introduced by `549308c`.
+
+Ancestry confirms this is a real in-branch revert rather than a base artifact:
+`git merge-base main 8476db7` is `589d821`, and both `320ed3e` and `549308c` are
+ancestors of it, so upstream's own `next` had these fixes and this commit removes them.
+`git log --oneline -S appendRetrievalBytes main..origin/next` returns only `8476db7`.
+
+Our tree still has both fixes: `src/server.ts:60,973` and `:4762,4764`, with
+`src/session/retrieval-marker.ts:41` and `src/session/analytics.ts:1475` defining them.
+Verified by `tests/session/retrieval-marker.test.ts` and
+`tests/session/real-bytes-stats.test.ts`, 24 tests passing.
+
+Consequence: the fetch-ladder port took only the ladder hunks from `8476db7`. A future
+merge or cherry-pick of that commit in full would silently reintroduce both bugs. If
+upstream's `next` is ever merged, these two deletions must be rejected in the conflict
+resolution, the same way upstream's stale `getStorePath()` must be.
+
+No conflict with our own `6663f75`, which changes `getRealBytesStats`'s internal file
+arbitration, a different function.
+
 ## Standing warning: re-measure, do not trust prior numbers
 
 Every number and every "regression" label recorded in this history's past sessions
