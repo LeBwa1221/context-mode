@@ -186,6 +186,48 @@ Also confirmed while investigating: the `stats-pid-<N>.json` files in
 pre-`3388883` server build, not active writes. `getStatsFilePath()`
 (`src/server.ts:1064`) now routes through the global root.
 
+### 7. Full-suite failures are contention artifacts, not regressions
+
+Established 2026-08-21 by bisect. Do not re-derive this.
+
+The full suite (`npm test`, ~4849 tests) produces a DIFFERENT failure count on every
+run of identical code. Measured: 19, 11, 14, and 45 failures across four runs, with
+different test names each time. The variance is concentrated in two files:
+
+- `tests/core/server.test.ts` - spawns real MCP server child processes. Measured at
+  2, 6, 8, 10 and ~16 failures.
+- `tests/executor.test.ts` and `tests/executor/cwd-override.test.ts` - 29 failures in
+  the worst run.
+
+Both pass 100% in isolation. Verified twice each at vitest 4.1.11 and, force-pinned,
+at 4.0.18: `Test Files 2 passed | Tests 123 passed | 31 skipped`. The vitest bump in
+`ce989cc` is NOT the cause; that was bisected and cleared.
+
+Failure signatures are resource starvation, not logic: empty `VAR=` in every
+environment-passthrough test, a PowerShell `ParserError` on
+`"C:\Program Files\nodejs\node.exe" --version` (missing `&` call operator), CRLF
+`'apple\r'` where LF was expected, `awaitRpc timeout`, `EBUSY: resource busy`, and
+`Timed out after 10000ms waiting for process tree to spawn`.
+
+`vitest.config.ts` already documents the mechanism: `maxWorkers: 3` with the comment
+"Cap parallel workers to prevent fork exhaustion (#258)... Benchmarked: 3 workers =
+2.8x speedup with near-zero crashes (vs unlimited = 3.7x but 6-7 worker kills/run)",
+plus a raised `teardownTimeout` for Windows native-addon cleanup races.
+
+Compounding factor on this machine: every open Claude Code session runs context-mode's
+own MCP server as a node process, so the suite competes with the thing running it. A
+trustworthy number requires closing every Claude Code window first.
+
+Separately known-environmental (6 failures, unrelated to the above): 5x `EPERM` at
+`symlinkSync` needing Windows Developer Mode, plus 1 in `tests/hooks/claude-stop.test.ts`.
+
+If pursued, the fix belongs in worker/parallelism tuning in `vitest.config.ts` or in
+the executor's shell-resolution robustness under contention. NOT in a dependency
+revert and NOT in the test assertions, which are correct.
+
+WARNING for future capture: a run captured via `powershell.exe` (Windows PowerShell
+5.1) writes UTF-16LE and mangles vitest's unicode glyphs. Use `pwsh` (PowerShell 7).
+
 ## Standing warning: re-measure, do not trust prior numbers
 
 Every number and every "regression" label recorded in this history's past sessions
