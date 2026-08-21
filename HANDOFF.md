@@ -272,6 +272,14 @@ Run `scripts/merge-stores.ts` with NO `--apply` - every group should report as a
 merged. Then spot-check `ctx_search` for content that previously existed only in a
 profile store.
 
+Already spot-checked once on 2026-08-21 and it passed. A `ctx_search` on this
+project (`3186c0e9a3008ca2`) returned auto-memory entries dated 2026-07-20 and
+2026-08-12. The global store held 7 `session_events` for this project before the
+merge and the `.claude-ime` profile store held 174, so content spanning those
+dates could not have come from the pre-merge global copy. This is strong evidence
+rather than proof: it was not established that those exact rows were among the
+stranded set. Re-run the check anyway.
+
 **3. Retire the backups, in this order.**
 Only once 1 and 2 pass: delete `C:\Projects\_store-backup-20260820-premerge` (5457
 files, ~670 MB, taken immediately before the phase 2 migration), then the per-profile
