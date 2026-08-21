@@ -8,6 +8,7 @@ import { existsSync, mkdtempSync, realpathSync, rmSync, unlinkSync } from "node:
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveContextModeDataRoot } from "../../src/adapters/base.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HOOK_PATH = join(__dirname, "..", "..", "hooks", "stop.mjs");
@@ -51,7 +52,9 @@ describe("Claude Code stop hook", () => {
   beforeAll(() => {
     tempDir = realpathSync(mkdtempSync(join(tmpdir(), "claude-stop-hook-test-")));
     const hash = hashCanonical(normalizeProjectPathForSessionHash(tempDir));
-    dbPath = join(fakeHome, ".claude", "context-mode", "sessions", `${hash}.db`);
+    // maint/integration (HANDOFF.md item 6): hook storage resolves the shared
+    // global root (resolveContextModeDataRoot), not a ~/.claude-scoped dir.
+    dbPath = join(resolveContextModeDataRoot(undefined, fakeHome), "context-mode", "sessions", `${hash}.db`);
   });
 
   afterAll(() => {

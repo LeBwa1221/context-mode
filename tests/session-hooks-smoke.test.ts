@@ -14,6 +14,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { SessionDB } from "../src/session/db.js";
+import { resolveContextModeDataRoot } from "../src/adapters/base.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, "..");
@@ -22,7 +23,7 @@ const PROJECT_ROOT = join(__dirname, "..");
 let fakePluginDir: string;
 let fakeProjectDir: string;
 let fakeHomeDir: string;
-/** Where getSessionDBPath() actually writes: <fakeHome>/.claude/context-mode/sessions/ */
+/** Where getSessionDBPath() actually writes: resolveContextModeDataRoot(fakeHome)/context-mode/sessions/ */
 let sessionDBDir: string;
 let codexSessionDBDir: string;
 
@@ -49,8 +50,11 @@ beforeAll(() => {
 
   // Fake HOME so getSessionDBPath() writes to an isolated location
   fakeHomeDir = mkdtempSync(join(tmpdir(), "ctx-fakehome-"));
-  sessionDBDir = join(fakeHomeDir, ".claude", "context-mode", "sessions");
-  codexSessionDBDir = join(fakeHomeDir, ".codex", "context-mode", "sessions");
+  // maint/integration (HANDOFF.md item 6): hook storage resolves the shared
+  // global root (resolveContextModeDataRoot), not a ~/.claude- or
+  // ~/.codex-scoped dir.
+  sessionDBDir = join(resolveContextModeDataRoot(undefined, fakeHomeDir), "context-mode", "sessions");
+  codexSessionDBDir = sessionDBDir;
 });
 
 afterAll(() => {
