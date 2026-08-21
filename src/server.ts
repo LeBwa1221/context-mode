@@ -4158,7 +4158,9 @@ server.registerTool(
 
 Cached on disk, default TTL 24h; \`ttl: 0\` or \`force: true\` bypasses cache. Multi-URL: pass \`requests: [{url, source?}, ...]\` with \`concurrency\` 2-8 (fetch phase only; indexing is always serial).
 
-WHEN NOT: content is already local (use ctx_index) or the page is SPA-rendered (plain HTTP fetch, no headless browser).`,
+SPA pages: fetch them the same way. There is no headless browser; a cost-ordered ladder climbs past a JavaScript shell instead - (1) \`Accept: text/markdown\` on the request already being made, (2a) the page's \`.md\` sibling, (2b) the host's llms.txt - and only rungs past 1 cost an extra request, and only when rung 1 came back empty.
+
+WHEN NOT: content is already local (use ctx_index) or the page is an application rather than a document (a whiteboard, a diagram editor) - there is no article to fetch, and the fetch will say so rather than index the shell.`,
     inputSchema: z.object({
       url: z.string().optional().describe("Single URL to fetch and index (legacy single-shape)"),
       source: z
