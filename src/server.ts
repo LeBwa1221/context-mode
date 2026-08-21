@@ -3284,6 +3284,18 @@ function emit(ct, content, sourceBytes, route) {
   console.log(String(route || 'html'));
 }
 
+// Route 1 of the order of operations: ask for the machine-readable version of
+// the page on the SAME request we were already making. Costs zero extra round
+// trips. Measured 2026-08-12 — docs.stripe.com returns 1,846,885 B of HTML to
+// a plain request and 11,744 B of pure article to this one; GitBook, Mintlify,
+// Resend, Polygon, nextjs.org and developers.cloudflare.com behave the same.
+// Sites that do not publish markdown (developer.mozilla.org) simply return
+// HTML as before — the q-values keep the request a superset of the old one,
+// so there is no site this can newly break.
+const ACCEPT_HEADERS = {
+  'accept': 'text/markdown, text/x-markdown;q=0.9, text/html;q=0.8, application/xhtml+xml;q=0.8, */*;q=0.5',
+};
+
 // Manual redirect handling: a 3xx Location header can rebind the subprocess
 // fetch to an alternate host the parent's pre-flight ssrfGuard never saw.
 // Even with the connect-time DNS patch, a redirect target that is a literal
@@ -3293,7 +3305,7 @@ const MAX_REDIRECTS = 5;
 async function fetchWithManualRedirect(initialUrl) {
   let currentUrl = initialUrl;
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount++) {
-    const resp = await fetch(currentUrl, { redirect: 'manual' });
+    const resp = await fetch(currentUrl, { redirect: 'manual', headers: ACCEPT_HEADERS });
     if (resp.status < 300 || resp.status >= 400) return resp;
     const location = resp.headers.get('location') || resp.headers.get('Location');
     if (!location) return resp;
@@ -3360,6 +3372,17 @@ async function main() {
   if (!resp.ok) { console.error("HTTP " + resp.status); process.exit(1); }
   const contentType = resp.headers.get('content-type') || '';
 
+  // --- Site-authored markdown (route 1 — the cheapest correct answer) ---
+  // The server honoured our Accept header and handed back the page as the
+  // author wrote it: article only, no nav, no CSS, nothing to extract. Emit
+  // it under the 'html' indexing strategy (heading-aware markdown chunking)
+  // and tell the parent the route so it skips classification entirely.
+  if (contentType.includes('text/markdown') || contentType.includes('text/x-markdown')) {
+    const md = await safeText(resp);
+    emit('html', md, Buffer.byteLength(md, 'utf-8'), 'markdown');
+    return;
+  }
+
   // --- JSON responses ---
   if (contentType.includes('application/json') || contentType.includes('+json')) {
     const text = await safeText(resp);
@@ -3385,6 +3408,22 @@ async function main() {
 
   // --- Everything else: plain text, CSV, XML, etc. ---
   const text = await safeText(resp);
+  // Some sites answer the markdown Accept with the markdown document but
+  // label it text/plain (measured 2026-08-12: cursor.com/docs/context/rules
+  // returns 16,636 B of "# Rules ..." as text/plain). Recognising an ATX H1
+  // on the first non-blank line is a structural check, not a threshold, and
+  // it only ever changes which chunker runs — the whole document is indexed
+  // either way, so a false positive cannot lose a byte.
+  if (contentType.includes('text/plain')) {
+    let firstLine = '';
+    for (const line of text.split('\\n')) {
+      if (line.trim().length > 0) { firstLine = line.trim(); break; }
+    }
+    if (firstLine.lastIndexOf('# ', 0) === 0) {
+      emit('html', text, Buffer.byteLength(text, 'utf-8'), 'markdown');
+      return;
+    }
+  }
   emit('text', text, Buffer.byteLength(text, 'utf-8'), 'text');
 }
 main();
