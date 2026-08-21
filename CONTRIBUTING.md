@@ -84,6 +84,82 @@ Raw session events are **never injected into context**. Only a compact summary t
 
 Both SessionDB and ContentStore are **multi-writer-safe**. Two processes may open the same on-disk dbPath simultaneously — that is the legitimate multi-window UX shape. Write contention is handled by `withRetry()` on top of SQLite's built-in `busy_timeout` (30000ms). Do NOT add `acquireDbLock`-style file locks or `locking_mode = EXCLUSIVE` pragmas to `SQLiteBase` or `applyWALPragmas`. Process-identity invariants (one MCP per project) live in `src/util/sibling-mcp.ts`, not the DB layer.
 
+## Four main rules
+
+These are not style preferences. Each came from a real failure, and each one describes a bug that **does not announce itself** - no exception, no log line, no empty state on screen. That is why they are rules and not review notes: the next instance will look exactly as reasonable as the last one did.
+
+### 1. No regex
+
+Not in shipped code, not in tests. A pattern that matches words a human chose matches them in the language the author happened to speak. A Korean or Arabic user matches no branch, ever - and a feature that never announces its absence never gets a bug filed against it.
+
+Use instead:
+
+- **structural checks** - code point classes, delimiter walks, character loops, lengths, counts, `startsWith` / `endsWith` / `includes` / `split` / `Set.has`;
+- **real parsers** - `JSON.parse`, `URL`, a shell-quoting walk, never pattern extraction;
+- **protocol constants** - tokens a machine emits identically for everyone: tool names, our own id prefixes, HTTP status, exit codes.
+
+Matching a fixed token that a machine writes is fine. Matching prose is not. `src/session/extract.ts` is the worked example throughout - every non-trivial parse there is a labelled character loop.
+
+### 2. No truncation
+
+Owner, 2026-08-12: "Truncate yasak. Tipki RegEx gibi." - same standing as the regex ban.
+
+**A cut is the only data loss that leaves the data looking intact.** Delete a row and a count moves. Fail a write and something throws. Cut the last 40% off a value and what remains is a well-formed string of the right type in the right place, so no query fails, no log line appears, and nobody files the bug. The operation destroys the evidence and the record that the evidence was damaged, in one step.
+
+Banned:
+
+- cutting content that will be **stored, indexed, returned or asserted on**;
+- `head -c` on evidence - also `head -n`, `tail -c`, `tail -n`, `cut -c`, `head -5`;
+- a **capped result set with no stated total**: rows handed back without the count, so the caller cannot tell "all of them" from "the first twenty";
+- a report showing "first N" **as if it were the answer**.
+
+Not banned, and this is the prescribed alternative rather than a loophole:
+
+- **paging** - a declared size **and** a cursor **and** a total. All three, or it is a cut wearing a page's clothes;
+- **a preview beside the whole thing**, when the whole thing is stored and reachable;
+- **deriving a value whose source is kept**. The test is not "it feels harmless": name the thing that still holds the whole value. If you cannot name it, it is a cut;
+- **hashing** an identity value that genuinely needs a bound. A hash collides only on collision; a prefix collides on every shared prefix, silently.
+
+`src/truncate.ts` exists and stays. Cutting output on its way to a model is this project's whole job - but only in the compliant shape, and `indexFetched()` in `src/server.ts` is what that shape looks like:
+
+```ts
+indexed = store.index({ content: f.markdown, source: storageLabel, attribution });   // the WHOLE thing is stored first
+...
+const preview = f.markdown.length > FETCH_PREVIEW_LIMIT
+  ? charSafePrefix(f.markdown, FETCH_PREVIEW_LIMIT) + "...[truncated - use ctx_search() for full content]"
+  : f.markdown;
+return { label: indexed.label, totalChunks: indexed.totalChunks, totalBytes: ..., preview };
+```
+
+Four properties, and all four are required: the full content is indexed **before** anything is cut; the cut is **labelled**; `totalBytes` and `totalChunks` state the size of what was kept; and the label names **how to get the rest**. A preview that drops any one of those is not a preview, it is a cut.
+
+So: when you add a cap, ask **if this value were damaged, what would tell us?** If the answer is "nothing", it is banned. Ways out in order - store it whole -> page it -> hash it -> store it whole elsewhere and return a resolvable reference.
+
+### 3. A unit case passing is not proof
+
+Owner, 2026-08-12: "Her zaman testler claude -p ile ve transcript ile."
+
+Vitest is the fast feedback loop and every PR still needs it (see TDD Workflow below). It is not evidence that the feature works, because the thing it drives is not the thing users drive: context-mode runs **inside a real client's hook and MCP loop**, with that client's own prompt assembly, tool loop and context management. A test that calls a function directly is testing a call no client ever makes.
+
+Two things settle a behavioural claim:
+
+1. **A live client session.** Install the dev build (below), run the real prompt, and compare against `main` - the "Output quality matters" step is this rule, not a nicety.
+2. **The transcript.** Claude Code writes every session to `~/.claude/projects/<slugified-cwd>/<session-uuid>.jsonl`, one JSON record per line. That is exactly what the client received. Records are **per content block, not per message** - group by `message.id` in file order and concatenate `message.content` to reconstruct the array the API actually saw. Reading records one at a time shows `['text']`, `['tool_use']` and hides the real shape.
+
+**Never read the verdict out of what the model typed.** The model is a participant in the run, not a witness to it: asked to observe a system it is part of, it will sometimes fix the subject under test and report on something else instead. Read the transcript, or have the run write its result somewhere durable and read it back separately.
+
+Where you could not exercise the real path, say so and name the link that went untested. Never a plausible sentence where the evidence is missing.
+
+### 4. A test file that dies at setup proves nothing
+
+A file that throws in `beforeAll` reports zero information about the assertions inside it - not "these passed" and not "these failed", just silence where a signal should be. Worse, a file that is already red for an unrelated reason gives a new failure nowhere to stand out: the file looked broken before, it looks broken now, and nobody notices the regression it just started hiding.
+
+`tests/session-hooks-smoke.test.ts` and `tests/hooks/cache-heal-self-heal.test.ts` created real symlinks in `beforeAll` with no capability guard. On a Windows machine without Developer Mode, `symlinkSync` throws EPERM before a single assertion runs, so the whole file died at setup. That masked a real regression introduced by commit `958397a` for days, because a file already red for an environmental reason looked no worse when it broke for a real one.
+
+Setup must degrade to an explicit skip, not an error - and the guard must be a runtime capability probe, not a platform name check, so machines that can do the thing (including a Windows CI runner with Developer Mode on) still get coverage. `bd8aa08` added `tests/util/symlink-capability.ts` (`canCreateSymlinks()` attempts a real symlink in a temp dir and caches the result) and converted the unguarded `symlinkSync` call sites, four of them to junctions (which need no privilege) and the rest behind the probe via `it.skipIf(!canCreateSymlinks())`.
+
+A test file that is persistently red for a known environmental reason is not background noise. It is a blind spot, and it hides the next real failure.
+
 ## Prerequisites
 
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed
