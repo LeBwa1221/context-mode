@@ -238,8 +238,13 @@ Compounding factor on this machine: every open Claude Code session runs context-
 own MCP server as a node process, so the suite competes with the thing running it. A
 trustworthy number requires closing every Claude Code window first.
 
-Separately known-environmental (6 failures, unrelated to the above): 5x `EPERM` at
-`symlinkSync` needing Windows Developer Mode, plus 1 in `tests/hooks/claude-stop.test.ts`.
+Developer Mode was enabled on 2026-08-21, so the 5x `EPERM` at `symlinkSync`
+failures no longer occur. That unmasked 4 stale session-DB path assertions in
+`tests/session-hooks-smoke.test.ts` and `tests/hooks/claude-stop.test.ts` (they
+still expected the old `~/.claude`/`~/.codex`-scoped dir instead of the global
+root); fixed in `4d08618`. The remaining known-variable failures are the
+contention ones above, in `tests/core/server.test.ts` and `tests/executor.test.ts`
+only.
 
 If pursued, the fix belongs in worker/parallelism tuning in `vitest.config.ts` or in
 the executor's shell-resolution robustness under contention. NOT in a dependency
