@@ -3131,6 +3131,15 @@ export function buildFetchCode(url: string, outputPath: string): string {
     classifyIpFnName === "classifyIp"
       ? `var classifyIp = ${classifyIpInner};`
       : `var ${classifyIpFnName} = ${classifyIpInner};\nvar classifyIp = ${classifyIpFnName};`;
+  // Same injection, same bundler hazard, for the shell classifier. The
+  // subprocess must decide "did rung 1 actually produce an article?" with the
+  // arithmetic the parent ships, not a second copy of it that can drift.
+  const classifyExtractionInner = classifyExtraction.toString();
+  const classifyExtractionFnName = classifyExtraction.name || "classifyExtraction";
+  const classifyExtractionSrc =
+    classifyExtractionFnName === "classifyExtraction"
+      ? `var classifyExtraction = ${classifyExtractionInner};`
+      : `var ${classifyExtractionFnName} = ${classifyExtractionInner};\nvar classifyExtraction = ${classifyExtractionFnName};`;
   const strictMode = process.env.CTX_FETCH_STRICT === "1";
   // Default strips proxy env so the connect-time rebinding guard runs (#476/#1039).
   // Opt-in is exact string "1" only (any other value keeps the strip path).
@@ -3158,6 +3167,8 @@ const outputPath = ${escapedOutputPath};
 ${proxyEnvBlock}
 
 ${classifyIpSrc}
+
+${classifyExtractionSrc}
 
 const STRICT = ${JSON.stringify(strictMode)};
 
@@ -3268,7 +3279,7 @@ dns.resolve = function patchedResolveGeneric(hostname, rrtype, cb) {
   });
 };
 
-function emit(ct, content, sourceBytes, route) {
+function emit(ct, content, sourceBytes, route, rung, tried) {
   // Write content to file to bypass executor stdout truncation (100KB limit).
   // Only the content-type marker goes to stdout.
   fs.writeFileSync(outputPath, content);
@@ -3282,6 +3293,14 @@ function emit(ct, content, sourceBytes, route) {
   // needed; 'html' means we converted it and the parent must classify it.
   // A missing line 3 means "old bundle" and the parent assumes 'html'.
   console.log(String(route || 'html'));
+  // Line 4: WHICH RUNG OF THE LADDER ANSWERED. The whole point of a ladder is
+  // that a reader can tell which step paid, so this is reported on every
+  // fetch, success or refusal — never inferred from byte counts.
+  console.log(String(rung || 'unknown'));
+  // Line 5: the rung-2 URLs actually requested, so a refusal can name them
+  // instead of telling the caller to go look for files we already looked for.
+  // Empty array when rung 2 never ran (the cheap rungs answered).
+  console.log(JSON.stringify(tried || []));
 }
 
 // Route 1 of the order of operations: ask for the machine-readable version of
@@ -3310,7 +3329,13 @@ async function fetchWithManualRedirect(initialUrl) {
     const location = resp.headers.get('location') || resp.headers.get('Location');
     if (!location) return resp;
     if (redirectCount === MAX_REDIRECTS) {
-      throw new Error('SSRF blocked: redirect chain exceeded ' + MAX_REDIRECTS + ' hops');
+      throw new Error(
+        'redirect chain exceeded ' + MAX_REDIRECTS + ' hops, so the walk stopped before the ' +
+        'SSRF check could be re-run on another hop. A benign locale or consent redirect loop ' +
+        'produces this too (measured on Google devsite hosts, 2026-08-12); it is not by itself ' +
+        'evidence of an attack. Fetch the page from a host that does not bounce, or fetch its ' +
+        'raw source file directly.'
+      );
     }
     let nextParsed;
     try { nextParsed = new URL(location, currentUrl); } catch (e) {
@@ -3367,6 +3392,139 @@ async function safeText(resp) {
   return text;
 }
 
+// ── Rung 2 of the ladder: the site's own machine-readable files ──────────
+//
+// Reached ONLY when the cheaper rungs did not produce an article, so the happy
+// path still costs exactly the one request it always did. Two sub-rungs, in
+// cost order:
+//
+//   2a  the '.md' sibling of the page path
+//   2b  the origin's llms.txt, followed only when it names a DIFFERENT url for
+//       this page than 2a already tried
+//
+// Measured 2026-08-12 over 36 documentation pages (scripts/measure-fetch-ladder.cjs):
+// developer.apple.com/documentation/swiftui/view converts to 36 B of text from
+// a 17,486 B shell — the hardest measured SPA — and its '.md' sibling returns
+// 5,593 B of the real article. reactnative.dev/docs/view ignores the Accept
+// header entirely and serves 30,318 B of markdown at '/docs/view.md'.
+
+/** '.md' sibling candidates for a page path, most conventional first. */
+function mdSiblingUrls(pageUrl) {
+  const p = new URL(pageUrl);
+  const pathname = p.pathname;
+  const dotHtml = '.html';
+  const out = [];
+  if (pathname.length > dotHtml.length && pathname.lastIndexOf(dotHtml) === pathname.length - dotHtml.length) {
+    out.push(pathname.substring(0, pathname.length - dotHtml.length) + '.md');
+  } else if (pathname.charAt(pathname.length - 1) === '/') {
+    out.push(pathname.substring(0, pathname.length - 1) + '.md');
+    out.push(pathname + 'index.md');
+  } else {
+    out.push(pathname + '.md');
+    out.push(pathname + '/index.md');
+  }
+  const urls = [];
+  for (let i = 0; i < out.length; i++) {
+    const full = p.origin + out[i];
+    if (urls.indexOf(full) < 0) urls.push(full);
+  }
+  return urls;
+}
+
+// A machine-readable sibling is accepted only when the server did not hand
+// back an HTML page. The common failure is a soft 404: status 200 carrying the
+// SPA shell. That is caught structurally, by looking for a document element,
+// NOT by guessing at the body's shape — developer.apple.com serves its .md
+// with an EMPTY Content-Type and an HTML comment as its first bytes, so a
+// "starts with #" test would reject a real article (measured 2026-08-12).
+function isMachineReadable(resp, body) {
+  if (resp.status !== 200) return false;
+  const ct = (resp.headers.get('content-type') || '').toLowerCase();
+  if (ct.indexOf('html') >= 0) return false;
+  const lower = body.toLowerCase();
+  if (lower.indexOf('<!doctype html') >= 0) return false;
+  if (lower.indexOf('<html') >= 0) return false;
+  return body.trim().length > 0;
+}
+
+// llms.txt is an INDEX, not the page. Following it blindly would re-fetch the
+// url we just failed on, so it is only useful when it names this page at a
+// location 2a did not already try — a site that publishes its markdown on
+// another host is the case this covers.
+function llmsTargetFor(body, pathname, alreadyTried, base) {
+  const lines = body.split('\\n');
+  for (let i = 0; i < lines.length; i++) {
+    const open = lines[i].indexOf('](');
+    if (open < 0) continue;
+    const close = lines[i].indexOf(')', open);
+    if (close < 0) continue;
+    const target = lines[i].substring(open + 2, close).trim();
+    if (target.length === 0) continue;
+    let abs;
+    try { abs = new URL(target, base).toString(); } catch (e) { continue; }
+    let entryPath;
+    try { entryPath = new URL(abs).pathname; } catch (e) { continue; }
+    const dotMd = '.md';
+    const bare = (entryPath.length > dotMd.length &&
+      entryPath.lastIndexOf(dotMd) === entryPath.length - dotMd.length)
+      ? entryPath.substring(0, entryPath.length - dotMd.length)
+      : entryPath;
+    // The entry must name THIS page. A path suffix match is segment-safe
+    // because pathname always begins with '/', so the match can only start
+    // at a segment boundary.
+    const names = bare === pathname ||
+      bare + '/' === pathname ||
+      bare === pathname + '/' ||
+      (bare.length > pathname.length && bare.lastIndexOf(pathname) === bare.length - pathname.length);
+    if (!names) continue;
+    if (abs === base) continue;
+    if (alreadyTried.indexOf(abs) >= 0) continue;
+    return abs;
+  }
+  return '';
+}
+
+/** Climb rung 2. Returns the recovered document, or the urls it tried. */
+async function climbRung2(pageUrl) {
+  const tried = [];
+  const siblings = mdSiblingUrls(pageUrl);
+  for (let i = 0; i < siblings.length; i++) {
+    tried.push(siblings[i]);
+    try {
+      const r = await fetchWithManualRedirect(siblings[i]);
+      const b = await safeText(r);
+      if (isMachineReadable(r, b)) {
+        return { body: b, url: siblings[i], rung: '2a-md-sibling', tried: tried };
+      }
+    } catch (e) { /* a missing sibling is the expected case, not an error */ }
+  }
+  const origin = new URL(pageUrl).origin;
+  const llmsUrl = origin + '/llms.txt';
+  tried.push(llmsUrl);
+  let llmsBody = '';
+  try {
+    const r = await fetchWithManualRedirect(llmsUrl);
+    const b = await safeText(r);
+    if (isMachineReadable(r, b)) llmsBody = b;
+  } catch (e) { /* no llms.txt on this host */ }
+  if (llmsBody.length > 0) {
+    let pathname = '/';
+    try { pathname = new URL(pageUrl).pathname; } catch (e) { pathname = '/'; }
+    const target = llmsTargetFor(llmsBody, pathname, tried, pageUrl);
+    if (target.length > 0) {
+      tried.push(target);
+      try {
+        const r2 = await fetchWithManualRedirect(target);
+        const b2 = await safeText(r2);
+        if (isMachineReadable(r2, b2)) {
+          return { body: b2, url: target, rung: '2b-llms-txt', tried: tried };
+        }
+      } catch (e) { /* the index named a url that does not serve */ }
+    }
+  }
+  return { body: '', url: '', rung: '', tried: tried };
+}
+
 async function main() {
   const resp = await fetchWithManualRedirect(url);
   if (!resp.ok) { console.error("HTTP " + resp.status); process.exit(1); }
@@ -3379,7 +3537,7 @@ async function main() {
   // and tell the parent the route so it skips classification entirely.
   if (contentType.includes('text/markdown') || contentType.includes('text/x-markdown')) {
     const md = await safeText(resp);
-    emit('html', md, Buffer.byteLength(md, 'utf-8'), 'markdown');
+    emit('html', md, Buffer.byteLength(md, 'utf-8'), 'markdown', '1-accept-markdown', []);
     return;
   }
 
@@ -3389,9 +3547,9 @@ async function main() {
     const received = Buffer.byteLength(text, 'utf-8');
     try {
       const pretty = JSON.stringify(JSON.parse(text), null, 2);
-      emit('json', pretty, received, 'json');
+      emit('json', pretty, received, 'json', '1-json-passthrough', []);
     } catch {
-      emit('text', text, received, 'text');
+      emit('text', text, received, 'text', '1-text-passthrough', []);
     }
     return;
   }
@@ -3399,10 +3557,31 @@ async function main() {
   // --- HTML responses (default for text/html, application/xhtml+xml) ---
   if (contentType.includes('text/html') || contentType.includes('application/xhtml')) {
     const html = await safeText(resp);
+    const sourceBytes = Buffer.byteLength(html, 'utf-8');
     const td = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
     td.use(gfm);
     td.remove(['script', 'style', 'nav', 'header', 'footer', 'noscript']);
-    emit('html', td.turndown(html), Buffer.byteLength(html, 'utf-8'), 'html');
+    const converted = td.turndown(html);
+
+    // The site served HTML rather than markdown. If what came back converts to
+    // an article, that IS the answer and rung 2 is never requested. If it
+    // converts to a shell — the SPA case — climb to the site's own
+    // machine-readable files BEFORE giving up, using the same arithmetic the
+    // parent would have used to refuse.
+    if (classifyExtraction(converted.trim().length, sourceBytes).kind === 'shell') {
+      const climbed = await climbRung2(url);
+      if (climbed.body.length > 0) {
+        emit('html', climbed.body, Buffer.byteLength(climbed.body, 'utf-8'),
+             'markdown', climbed.rung, climbed.tried);
+        return;
+      }
+      // Ladder exhausted. Emit the shell anyway — the parent stores every
+      // byte it was served and refuses to INDEX it, and it now knows which
+      // urls were tried so the refusal can name them.
+      emit('html', converted, sourceBytes, 'html', 'ladder-exhausted', climbed.tried);
+      return;
+    }
+    emit('html', converted, sourceBytes, 'html', '1-html-converted', []);
     return;
   }
 
@@ -3420,11 +3599,11 @@ async function main() {
       if (line.trim().length > 0) { firstLine = line.trim(); break; }
     }
     if (firstLine.lastIndexOf('# ', 0) === 0) {
-      emit('html', text, Buffer.byteLength(text, 'utf-8'), 'markdown');
+      emit('html', text, Buffer.byteLength(text, 'utf-8'), 'markdown', '1-accept-markdown', []);
       return;
     }
   }
-  emit('text', text, Buffer.byteLength(text, 'utf-8'), 'text');
+  emit('text', text, Buffer.byteLength(text, 'utf-8'), 'text', '1-text-passthrough', []);
 }
 main();
 `;
@@ -3450,25 +3629,12 @@ function formatFetchTtl(ttlMs: number): string {
 
 type FetchOneResult =
   | { kind: "cached"; label: string; chunkCount: number; estimatedBytes: number; ageStr: string; ttlStr: string }
-  | { kind: "fetched"; url: string; source?: string; markdown: string; header: string; route: FetchRoute }
+  | { kind: "fetched"; url: string; source?: string; markdown: string; header: string; route: FetchRoute; rung: string }
   | { kind: "fetch_error"; url: string; error: string; reason: "exit" | "read" | "empty" | "shell" | "throw" };
 
 // ─────────────────────────────────────────────────────────
 // Extraction verdict — the "silent success" guard
 // ─────────────────────────────────────────────────────────
-
-/**
- * Text that survives conversion, below which a document carries no usable
- * content. A page title alone lands around 20 bytes; a one-line answer or a
- * short redirect notice lands around 100.
- */
-const SHELL_MAX_TEXT_BYTES = 200;
-
-/**
- * Fraction of received bytes that must survive conversion. Below this, the
- * bytes we were served were overwhelmingly markup and script rather than text.
- */
-const SHELL_MAX_YIELD = 0.02;
 
 export type ExtractionVerdict =
   | { kind: "ok" }
@@ -3499,12 +3665,25 @@ export type ExtractionVerdict =
  *
  * Arithmetic only: no pattern matching, no markup sniffing, no word lists.
  *
+ * The two thresholds live INSIDE the body on purpose. This function is
+ * injected verbatim into the fetch subprocess (see buildFetchCode) so the
+ * subprocess decides "is this a shell?" with the same arithmetic the parent
+ * uses — one definition, two callers. A `const` at module scope would not
+ * survive `.toString()` and the subprocess would throw a ReferenceError.
+ *
  * @param textBytes   length of the converted text, already trimmed
  * @param sourceBytes bytes received off the wire pre-conversion; a
  *                    non-positive value means the subprocess did not report it
  *                    (older bundle), and with no evidence we never accuse.
  */
 export function classifyExtraction(textBytes: number, sourceBytes: number): ExtractionVerdict {
+  // Text that survives conversion, below which a document carries no usable
+  // content. A page title alone lands around 20 bytes; a one-line answer or a
+  // short redirect notice lands around 100.
+  const SHELL_MAX_TEXT_BYTES = 200;
+  // Fraction of received bytes that must survive conversion. Below this, the
+  // bytes served were overwhelmingly markup and script rather than text.
+  const SHELL_MAX_YIELD = 0.02;
   if (!Number.isFinite(sourceBytes) || sourceBytes <= 0) return { kind: "ok" };
   if (!Number.isFinite(textBytes) || textBytes >= SHELL_MAX_TEXT_BYTES) return { kind: "ok" };
   const ratio = textBytes / sourceBytes;
@@ -3727,6 +3906,11 @@ async function fetchOneUrl(url: string, source: string | undefined, force: boole
     // Line 2 is the route. Absent (older bundle) means "we converted HTML",
     // which is the conservative reading: it keeps classification switched on.
     const route = parseFetchRoute((stdoutLines[2] || "").trim());
+    // Line 3 is which rung of the ladder answered; line 4 is the rung-2 urls
+    // that were requested. Both are absent on an older bundle, which reads as
+    // "not reported" rather than as "none" — we never invent evidence.
+    const rung = (stdoutLines[3] || "").trim() || "unreported";
+    const ladderTried = parseLadderTried(stdoutLines[4] || "");
     let markdown: string;
     try {
       // Parent-side defense-in-depth on the subprocess output size. The
@@ -3751,18 +3935,26 @@ async function fetchOneUrl(url: string, source: string | undefined, force: boole
     // simply retry the same URL and get the same 21 bytes.
     const verdict = classifyExtraction(markdown.length, sourceBytes);
     if (verdict.kind === "shell") {
+      // Rung 5 — the honest refusal. Every rung above it has now been tried,
+      // and the message names the urls that were requested so the caller does
+      // not go hunting for files the ladder already asked for.
+      const climbed = ladderTried.length > 0
+        ? ` The ladder was climbed first and every rung came back empty: ${ladderTried.join(", ")}.`
+        : "";
       return {
         kind: "fetch_error",
         url,
         error:
           `extracted only ${verdict.textBytes} bytes of text from ${verdict.sourceBytes} bytes received ` +
           `(${verdict.yieldPct}% yield) — the response was a shell whose content is rendered client-side ` +
-          `by JavaScript, so an HTTP fetch cannot see it. Nothing was indexed. Retrying this URL returns ` +
-          `the same shell; look for a docs, README, or API URL for this site instead.`,
+          `by JavaScript, so an HTTP fetch cannot see it. Nothing was indexed (the response is stored ` +
+          `whole and unaltered).${climbed} Retrying this URL returns the same shell. Fetch this page's ` +
+          `source instead: its repository README or raw doc file on GitHub, its OpenAPI or JSON schema ` +
+          `endpoint, or a sibling page of the same host that is server-rendered.`,
         reason: "shell",
       };
     }
-    return { kind: "fetched", url, source, markdown, header, route };
+    return { kind: "fetched", url, source, markdown, header, route, rung };
   } catch (err: unknown) {
     return {
       kind: "fetch_error",
@@ -3800,6 +3992,38 @@ function parseFetchRoute(raw: string): FetchRoute {
 }
 
 /**
+ * The rung-2 urls the subprocess requested. An unparseable or absent line
+ * yields an empty list, which the refusal reads as "not reported" — it never
+ * claims urls were tried when there is no evidence that they were.
+ */
+export function parseLadderTried(raw: string): string[] {
+  const line = raw.trim();
+  if (line.length === 0) return [];
+  let parsed: unknown;
+  try { parsed = JSON.parse(line); } catch { return []; }
+  if (!Array.isArray(parsed)) return [];
+  const out: string[] = [];
+  for (const entry of parsed) if (typeof entry === "string" && entry.length > 0) out.push(entry);
+  return out;
+}
+
+/**
+ * How the ladder's rung ids read in a report. The point of a ladder is that a
+ * reader can see WHICH step paid for this page, so every fetch says so.
+ */
+export function describeRung(rung: string): string {
+  if (rung === "1-accept-markdown") return "rung 1 — the site served markdown to the Accept header on the request we were already making";
+  if (rung === "1-html-converted") return "rung 1 — the site served HTML and it converted to an article";
+  if (rung === "1-json-passthrough") return "rung 1 — JSON response, indexed as-is";
+  if (rung === "1-text-passthrough") return "rung 1 — plain-text response, indexed as-is";
+  if (rung === "2a-md-sibling") return "rung 2a — rung 1 returned a JavaScript shell, and the page's .md sibling carried the article";
+  if (rung === "2b-llms-txt") return "rung 2b — rung 1 returned a JavaScript shell, and this host's llms.txt named the article elsewhere";
+  if (rung === "ladder-exhausted") return "ladder exhausted — every rung came back empty";
+  if (rung === "unreported") return "rung not reported (older fetch bundle)";
+  return `rung ${rung}`;
+}
+
+/**
  * Per-project store holding every fetched document whole, plus every block
  * with its content/template label. Lives beside the FTS content DB so the
  * existing cleanup and purge sweeps reach it.
@@ -3820,7 +4044,7 @@ export function getPageStore(): PageStore {
  * fetched results and calls this one-at-a-time to avoid SQLite WAL contention
  * (PRD finding E).
  */
-export function indexFetched(f: { url: string; source?: string; markdown: string; header: string; route?: FetchRoute }): IndexedFetchResult {
+export function indexFetched(f: { url: string; source?: string; markdown: string; header: string; route?: FetchRoute; rung?: string }): IndexedFetchResult {
   const store = getStore();
   // Storage label composed via composeFetchCacheKey so two URLs sharing a
   // `source` label do not overwrite each other (commit 1f1243e). ctx_search()
@@ -3828,6 +4052,7 @@ export function indexFetched(f: { url: string; source?: string; markdown: string
   const storageLabel = composeFetchCacheKey(f.source, f.url);
   const attribution = currentAttribution();
   const route = f.route ?? "html";
+  const rungId = f.rung ?? "unreported";
 
   // ── Template / content extraction ────────────────────────────────────
   // The converter answered "what format". This answers "which part of the
@@ -3847,27 +4072,29 @@ export function indexFetched(f: { url: string; source?: string; markdown: string
         store: getPageStore(),
       });
       if (outcome.kind === "refuse") {
+        // Rung 5 — the honest refusal, with the rung that produced the document
+        // named so the reader can see how far the ladder got.
         return {
           label: storageLabel,
           totalChunks: 0,
           totalBytes: outcome.storedBytes,
           preview: "",
-          refusal: outcome.reason,
+          refusal: `${describeRung(rungId)}; ${outcome.reason}`,
         };
       }
       indexText = outcome.indexText;
       relabelled = outcome.relabelled;
       if (route === "markdown") {
         extraction =
-          `route: site-authored markdown (${outcome.storedBytes} B) — no extraction needed`;
+          `${describeRung(rungId)}; site-authored markdown (${outcome.storedBytes} B) — no extraction needed`;
       } else if (outcome.provisional) {
         extraction =
-          `route: converted HTML — first page seen from this host, so all ${outcome.totalBlocks} blocks ` +
+          `${describeRung(rungId)}; rung 4 (block classification) — first page seen from this host, so all ${outcome.totalBlocks} blocks ` +
           `were indexed as content (PROVISIONAL); they are re-classified automatically when a second ` +
           `page of this host is fetched`;
       } else {
         extraction =
-          `route: converted HTML — ${outcome.totalBlocks - outcome.templateBlocks}/${outcome.totalBlocks} ` +
+          `${describeRung(rungId)}; rung 4 (block classification) — ${outcome.totalBlocks - outcome.templateBlocks}/${outcome.totalBlocks} ` +
           `blocks indexed as content (${outcome.contentBytes} B); ${outcome.templateBlocks} blocks ` +
           `(${outcome.templateBytes} B) were seen on other pages of this host, so they are labelled ` +
           `template — stored whole, kept out of the index`;
