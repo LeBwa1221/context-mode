@@ -381,6 +381,7 @@ export function getSessionId(input, opts = CLAUDE_OPTS) {
 
 function resolveSessionDir(opts) {
   return ensureWritableStorageDir(
+    // configDir/configDirEnv are ignored by resolveDefaultSessionDir (see src/session/db.ts) - kept for call-site clarity only.
     resolveSessionStorageDir(() => resolveDefaultSessionDir({
       configDir: opts.configDir,
       configDirEnv: opts.configDirEnv,

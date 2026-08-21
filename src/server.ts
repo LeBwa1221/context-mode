@@ -582,12 +582,14 @@ function getDefaultSessionDir(): string {
     const signal = detectPlatform();
     const segments = getSessionDirSegments(signal.platform);
     if (segments) {
+      // configDir/configDirEnv are ignored by resolveDefaultSessionDir (see src/session/db.ts) - kept for call-site clarity only.
       return resolveDefaultSessionDir({
         configDir: join(...segments),
         configDirEnv: configDirEnvForSessionSegments(segments),
       });
     }
   } catch { /* fall through to claude fallback */ }
+  // configDir/configDirEnv are ignored by resolveDefaultSessionDir (see src/session/db.ts) - kept for call-site clarity only.
   return resolveDefaultSessionDir({ configDir: ".claude", configDirEnv: "CLAUDE_CONFIG_DIR" });
 }
 

@@ -122,6 +122,7 @@ function readStdinJson() {
 
 function resolveSessionDir() {
   return ensureWritableStorageDir(
+    // configDir/configDirEnv are ignored by resolveDefaultSessionDir (see src/session/db.ts) - kept for call-site clarity only.
     resolveSessionStorageDir(() => resolveDefaultSessionDir({
       configDir: ".claude",
       configDirEnv: "CLAUDE_CONFIG_DIR",

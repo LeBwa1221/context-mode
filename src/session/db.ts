@@ -76,7 +76,9 @@ type OverrideRoot =
 const writableStorageCache = new Map<string, string | StorageDirectoryError>();
 
 export interface DefaultSessionDirOptions {
+  /** @deprecated Ignored since the store-root unification - the session dir is always the global root. Kept because callers still pass it. See the note in resolveDefaultSessionDir. */
   configDir: string;
+  /** @deprecated Ignored since the store-root unification - the session dir is always the global root. Kept because callers still pass it. See the note in resolveDefaultSessionDir. */
   configDirEnv?: string;
   legacySessionDirEnv?: string;
   onLegacySessionDir?: (envVar: string, dir: string) => void;
