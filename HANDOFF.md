@@ -295,6 +295,64 @@ The migration verified clean on 2026-08-21 (765 groups, all no-op on re-run, FTS
 intact, no duplicates or orphans, sources preserved). Re-run the checks rather than
 trusting that record - see the standing warning below.
 
+### 9. ctx_fetch_and_index silently indexes empty SPA shells
+
+Reproduced on this fork 2026-08-21. This is OUR defect, not a report of upstream's -
+the reproduction below was run against this working tree.
+
+Two URLs fetched through `ctx_fetch_and_index`, both reported `ok=2 ... err=0`, total
+0.1 KB indexed:
+
+    https://excalidraw.com/                                -> "Excalidraw Whiteboard"
+    https://developer.apple.com/documentation/swiftui/view  -> "View | Apple Developer Documentation"
+
+Only the page title was captured in each case. The Apple URL is substantial API
+documentation; we indexed its title, stored nothing else, and told the caller it
+succeeded. A caller gets a knowledge-base entry with no signal that the content is
+missing, so the model stops looking instead of trying another route.
+
+Root cause: the only emptiness guard on the fetch path is `markdown.length === 0`.
+A JS-rendered shell converts to a small but non-zero string, so it passes.
+
+Upstream has fixed this on its unreleased `next` branch (NOT on `origin/main`; as of
+2026-08-21 `main` has only `ci: update install stats` commits we lack). The relevant
+commits, all by Mert Koseoglu:
+
+- `0ce043f` fix(fetch): stop reporting a JavaScript-rendered shell as a successful
+  fetch. Adds `classifyExtraction()`, which accuses only when BOTH signals hold:
+  under 200 bytes of text out AND under 2 percent yield. This is the smallest
+  standalone fix and addresses the false success, though it converts the Apple case
+  into an honest refusal rather than retrieving it.
+- `8476db7` feat(fetch): rung 2 recovers SPA pages browser-free, via the page's `.md`
+  sibling then the host's `llms.txt`. This is what actually retrieves the Apple page.
+- `5b9c00c` feat(fetch): extract the article instead of transliterating the page.
+  Classifies each block as content or template by whether it repeats across other
+  pages of the same host, rather than by any byte or link-density threshold.
+- `e31360d` docs: removes the tool description line telling callers SPA pages cannot
+  be fetched. Our `ctx_fetch_and_index` description still carries that line.
+
+Upstream's measurements, from `docs/research/fetch-ladder-2026-08-12.md` and
+`fetch-extraction-2026-08-12.md` on `origin/next`:
+
+- 36 documentation pages probed. 4 had the article absent from the plain HTTP
+  response. 4 of 4 were recovered browser-free. 0 of 36 needed a headless browser.
+- Sending `Accept: text/markdown` on the SAME request, no extra round trip, fixed six
+  platforms outright: Stripe, GitBook, Cursor, Resend, Polygon, Mintlify.
+- No byte or link-density threshold can work: 28.3 percent link-only lines on
+  docs.stripe.com versus 0.3 percent on resend.com.
+- Two acceptance traps found: developer.apple.com serves its `.md` with an empty
+  Content-Type and an HTML comment as its first bytes; angular.dev answers a missing
+  `.md` with HTTP 200 and the SPA shell.
+
+Adoption note: a wholesale merge of `next` is NOT clean - `git merge-tree` reports
+conflicts in `src/server.ts` and `server.bundle.mjs`, because both lines rewrote
+`src/server.ts` independently. `0ce043f` alone may be cherry-pickable; that has not
+been assessed. The rest is a deliberate integration, not a cherry-pick.
+
+Not related to items 1 to 8. The other two commits on `next` (`c94e8fc` and its
+same-day revert `e1d9448`) concern upstream's hosted billing bridge, which this fork
+does not have.
+
 ## Standing warning: re-measure, do not trust prior numbers
 
 Every number and every "regression" label recorded in this history's past sessions
