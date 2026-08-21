@@ -33,9 +33,15 @@ beforeAll(() => {
   // Copy hooks directory
   cpSync(join(PROJECT_ROOT, "hooks"), join(fakePluginDir, "hooks"), { recursive: true });
 
-  // Symlink node_modules (needed for better-sqlite3, too large to copy)
+  // Symlink node_modules (needed for better-sqlite3, too large to copy).
+  // Junction: no Windows Developer Mode privilege needed, and a directory
+  // link is all module resolution requires here.
   if (existsSync(join(PROJECT_ROOT, "node_modules"))) {
-    symlinkSync(join(PROJECT_ROOT, "node_modules"), join(fakePluginDir, "node_modules"));
+    symlinkSync(
+      join(PROJECT_ROOT, "node_modules"),
+      join(fakePluginDir, "node_modules"),
+      process.platform === "win32" ? "junction" : undefined,
+    );
   }
 
   // Copy package.json (needed for module resolution)

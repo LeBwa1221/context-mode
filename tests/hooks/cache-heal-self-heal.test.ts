@@ -736,7 +736,13 @@ describe("Issues #814/#807 — cleanup leaves a breadcrumb to the live version",
     cpSync(join(BREADCRUMB_ROOT, "hooks"), join(currentDir, "hooks"), { recursive: true });
     cpSync(join(BREADCRUMB_ROOT, "package.json"), join(currentDir, "package.json"));
     if (existsSync(join(BREADCRUMB_ROOT, "node_modules"))) {
-      symlinkSync(join(BREADCRUMB_ROOT, "node_modules"), join(currentDir, "node_modules"));
+      // Junction: no Windows Developer Mode privilege needed, and a
+      // directory link is all module resolution requires here.
+      symlinkSync(
+        join(BREADCRUMB_ROOT, "node_modules"),
+        join(currentDir, "node_modules"),
+        process.platform === "win32" ? "junction" : undefined,
+      );
     }
 
     fakeProjectDir = mkdtempSync(join(tmpdir(), "ctx-breadcrumb-project-"));

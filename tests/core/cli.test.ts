@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { execSync, spawnSync } from "node:child_process";
 import { toUnixPath } from "../../src/cli.js";
 import { findMissingLaunchFiles } from "../../src/util/plugin-cache-integrity.js";
+import { canCreateSymlinks } from "../util/symlink-capability.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 
@@ -2178,7 +2179,10 @@ describe("start.mjs CLI self-heal", () => {
       expect(result.healed).toContain("start.mjs");
     });
 
-    it("healPartialInstallFromMarketplace replaces a planted leaf symlink at the destination instead of writing through it", async () => {
+    // Needs real symlink privilege: the planted link targets a file (not a
+    // directory), so a junction can't stand in. Windows Developer Mode
+    // enables the privilege.
+    it.skipIf(!canCreateSymlinks())("healPartialInstallFromMarketplace replaces a planted leaf symlink at the destination instead of writing through it", async () => {
       // Arbitrary-file-write primitive surfaced by the second
       // adversarial review: a stale heal leftover or a local attacker
       // plants `pluginRoot/server.bundle.mjs` as a symlink to an
@@ -2264,7 +2268,14 @@ describe("start.mjs CLI self-heal", () => {
         recursive: true,
         force: true,
       });
-      symlinkSync(attackerRoot, join(marketplaceClonePath, "scripts"));
+      // Junction: no Windows Developer Mode privilege needed. A junction
+      // reports isSymbolicLink()===true and resolves via realpathSync just
+      // like a symlink, so it reproduces the ancestor-traversal guard path.
+      symlinkSync(
+        attackerRoot,
+        join(marketplaceClonePath, "scripts"),
+        process.platform === "win32" ? "junction" : undefined,
+      );
 
       // package.json references the deep leaf through the
       // now-symlinked ancestor. lstat(from).isSymbolicLink() === false
@@ -2306,7 +2317,10 @@ describe("start.mjs CLI self-heal", () => {
       expect(result.healed).toContain("cli.bundle.mjs");
     });
 
-    it("healPartialInstallFromMarketplace rejects symlink entries that escape rootDir", async () => {
+    // Needs real symlink privilege: both links target files (not
+    // directories), so a junction can't stand in. Windows Developer Mode
+    // enables the privilege.
+    it.skipIf(!canCreateSymlinks())("healPartialInstallFromMarketplace rejects symlink entries that escape rootDir", async () => {
       // Symlink-based bypass for the ..-escape resolve+startsWith
       // guard: the symlink itself sits inside marketplaceClonePath, so
       // its lexical resolve stays inside rootDir, but the symlink
