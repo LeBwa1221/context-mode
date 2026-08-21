@@ -6,15 +6,17 @@
  * ever differs from `x` by a single byte, then labelling blocks silently
  * destroys bytes, and every downstream guarantee collapses.
  *
- * Covers blocks.ts and page-store.ts identity helpers only. Ported from
- * upstream's tests/fetch-extraction.test.ts (origin/next 5b9c00c); the
- * describe blocks exercising extract.ts (extractAndStore, store round trip)
- * are left for the phase that adds extract.ts.
+ * Covers blocks.ts, page-store.ts identity helpers, and extract.ts's store
+ * round trip. Ported from upstream's tests/fetch-extraction.test.ts
+ * (origin/next 5b9c00c).
  *
  * No regular expressions (repo-wide ban).
  */
 import { describe, test } from "vitest";
 import { strict as assert } from "node:assert";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import {
   splitBlocks,
   reassemble,
@@ -24,7 +26,8 @@ import {
   hashBlockText,
   normalizeBlockText,
 } from "../src/fetch/blocks.js";
-import { pageKeyFor, hostFor } from "../src/fetch/page-store.js";
+import { extractAndStore } from "../src/fetch/extract.js";
+import { PageStore, pageKeyFor, hostFor } from "../src/fetch/page-store.js";
 
 const NAV = "* [Home](/)\n* [Docs](/docs)\n* [Pricing](/pricing)\n";
 const FOOTER = "(c) 2026 Example Inc. All rights reserved.\n";
@@ -185,5 +188,76 @@ describe("page identity", () => {
   test("an unparseable url degrades to itself rather than throwing", () => {
     assert.equal(pageKeyFor("not a url"), "not a url");
     assert.equal(hostFor("not a url"), "");
+  });
+});
+
+describe("store round trip — nothing is dropped, only labelled", () => {
+  const dbPath = join(tmpdir(), `cm-fetch-extract-${process.pid}-${Date.now()}.db`);
+
+  test("second page of a host resolves the first page's cold start", () => {
+    const store = new PageStore(dbPath);
+    try {
+      const one = page("## One\n\nFirst article body.\n");
+      const two = page("## Two\n\nSecond article body.\n");
+
+      const r1 = extractAndStore({
+        url: "https://example.com/one", sourceLabel: "s1",
+        document: one, route: "html", store,
+      });
+      assert.equal(r1.kind, "index");
+      if (r1.kind !== "index") return;
+      assert.equal(r1.provisional, true, "first page of a host is provisional");
+      assert.equal(r1.templateBlocks, 0);
+
+      const r2 = extractAndStore({
+        url: "https://example.com/two", sourceLabel: "s2",
+        document: two, route: "html", store,
+      });
+      assert.equal(r2.kind, "index");
+      if (r2.kind !== "index") return;
+      assert.equal(r2.provisional, false);
+      assert.ok(r2.templateBlocks > 0, "shared nav/footer must be labelled template");
+      assert.ok(r2.indexText.indexOf("Second article body.") >= 0);
+      assert.ok(r2.indexText.indexOf("[Pricing](/pricing)") === -1);
+
+      // The cold-start page was re-classified, not left wrong forever.
+      assert.equal(r2.relabelled.length, 1, "page one must be re-classified");
+      assert.ok(r2.relabelled[0].indexText.indexOf("First article body.") >= 0);
+      assert.ok(r2.relabelled[0].indexText.indexOf("[Pricing](/pricing)") === -1);
+
+      // And the full documents are still there, byte for byte.
+      assert.equal(store.fullTextOf(pageKeyFor("https://example.com/one")), one);
+      assert.equal(store.fullTextOf(pageKeyFor("https://example.com/two")), two);
+    } finally {
+      store.close();
+      for (const s of ["", "-wal", "-shm"]) {
+        try { rmSync(dbPath + s, { force: true }); } catch { /* best effort */ }
+      }
+    }
+  });
+
+  test("a site shell is refused, and its bytes are stored anyway", () => {
+    const dbPath2 = join(tmpdir(), `cm-fetch-shell-${process.pid}-${Date.now()}.db`);
+    const store = new PageStore(dbPath2);
+    try {
+      const one = page("## One\n\nFirst article body.\n");
+      const two = page("## Two\n\nSecond article body.\n");
+      extractAndStore({ url: "https://ex2.com/one", sourceLabel: "s1", document: one, route: "html", store });
+      extractAndStore({ url: "https://ex2.com/two", sourceLabel: "s2", document: two, route: "html", store });
+
+      // A third fetch returns only the shell — every block already seen.
+      const shell = `# Example\n\n${NAV}\n${FOOTER}`;
+      const r3 = extractAndStore({
+        url: "https://ex2.com/three", sourceLabel: "s3", document: shell, route: "html", store,
+      });
+      assert.equal(r3.kind, "refuse");
+      // Refusing to index is not a licence to discard bytes.
+      assert.equal(store.fullTextOf(pageKeyFor("https://ex2.com/three")), shell);
+    } finally {
+      store.close();
+      for (const s of ["", "-wal", "-shm"]) {
+        try { rmSync(dbPath2 + s, { force: true }); } catch { /* best effort */ }
+      }
+    }
   });
 });

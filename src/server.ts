@@ -15,6 +15,8 @@ import { PolyglotExecutor } from "./executor.js";
 import { runPool, type PoolJob } from "./runPool.js";
 import { ContentStore, cleanupStaleDBs, cleanupStaleContentDBs, type SearchResult, type IndexResult } from "./store.js";
 import { composeFetchCacheKey } from "./fetch-cache.js";
+import { extractAndStore, routeSkipsExtraction, type FetchRoute, type Relabelled } from "./fetch/extract.js";
+import { PageStore } from "./fetch/page-store.js";
 import {
   readBashPolicies,
   evaluateCommandDenyOnly,
@@ -703,7 +705,7 @@ function getSessionDbPath(): string {
  *   e.g.  ~/.claude/context-mode/content/87c28c41ddb64d38.db
  *         ~/.cursor/context-mode/content/87c28c41ddb64d38.db
  */
-function getStorePath(): string {
+export function getStorePath(): string {
   const dir = ensureWritableStorageDir(resolveContentStorageDir(getDefaultSessionDir));
   // Delegate to resolveContentStorePath: same case-fold + one-shot legacy
   // rename behavior as resolveSessionDbPath. On macOS / Windows, an
@@ -3266,7 +3268,7 @@ dns.resolve = function patchedResolveGeneric(hostname, rrtype, cb) {
   });
 };
 
-function emit(ct, content, sourceBytes) {
+function emit(ct, content, sourceBytes, route) {
   // Write content to file to bypass executor stdout truncation (100KB limit).
   // Only the content-type marker goes to stdout.
   fs.writeFileSync(outputPath, content);
@@ -3275,6 +3277,11 @@ function emit(ct, content, sourceBytes) {
   // compute extraction yield. Emitted unconditionally so "absent" means
   // "old bundle", not "zero".
   console.log(String(typeof sourceBytes === 'number' ? sourceBytes : 0));
+  // Line 3: which route produced the document. 'markdown' means the SITE
+  // served a machine-readable version of the page and no extraction is
+  // needed; 'html' means we converted it and the parent must classify it.
+  // A missing line 3 means "old bundle" and the parent assumes 'html'.
+  console.log(String(route || 'html'));
 }
 
 // Manual redirect handling: a 3xx Location header can rebind the subprocess
@@ -3359,9 +3366,9 @@ async function main() {
     const received = Buffer.byteLength(text, 'utf-8');
     try {
       const pretty = JSON.stringify(JSON.parse(text), null, 2);
-      emit('json', pretty, received);
+      emit('json', pretty, received, 'json');
     } catch {
-      emit('text', text, received);
+      emit('text', text, received, 'text');
     }
     return;
   }
@@ -3372,13 +3379,13 @@ async function main() {
     const td = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
     td.use(gfm);
     td.remove(['script', 'style', 'nav', 'header', 'footer', 'noscript']);
-    emit('html', td.turndown(html), Buffer.byteLength(html, 'utf-8'));
+    emit('html', td.turndown(html), Buffer.byteLength(html, 'utf-8'), 'html');
     return;
   }
 
   // --- Everything else: plain text, CSV, XML, etc. ---
   const text = await safeText(resp);
-  emit('text', text, Buffer.byteLength(text, 'utf-8'));
+  emit('text', text, Buffer.byteLength(text, 'utf-8'), 'text');
 }
 main();
 `;
@@ -3404,7 +3411,7 @@ function formatFetchTtl(ttlMs: number): string {
 
 type FetchOneResult =
   | { kind: "cached"; label: string; chunkCount: number; estimatedBytes: number; ageStr: string; ttlStr: string }
-  | { kind: "fetched"; url: string; source?: string; markdown: string; header: string }
+  | { kind: "fetched"; url: string; source?: string; markdown: string; header: string; route: FetchRoute }
   | { kind: "fetch_error"; url: string; error: string; reason: "exit" | "read" | "empty" | "shell" | "throw" };
 
 // ─────────────────────────────────────────────────────────
@@ -3678,6 +3685,9 @@ async function fetchOneUrl(url: string, source: string | undefined, force: boole
     const stdoutLines = (result.stdout || "").trim().split("\n");
     const header = (stdoutLines[0] || "").trim();
     const sourceBytes = Number.parseInt((stdoutLines[1] || "").trim(), 10);
+    // Line 2 is the route. Absent (older bundle) means "we converted HTML",
+    // which is the conservative reading: it keeps classification switched on.
+    const route = parseFetchRoute((stdoutLines[2] || "").trim());
     let markdown: string;
     try {
       // Parent-side defense-in-depth on the subprocess output size. The
@@ -3713,7 +3723,7 @@ async function fetchOneUrl(url: string, source: string | undefined, force: boole
         reason: "shell",
       };
     }
-    return { kind: "fetched", url, source, markdown, header };
+    return { kind: "fetched", url, source, markdown, header, route };
   } catch (err: unknown) {
     return {
       kind: "fetch_error",
@@ -3726,11 +3736,44 @@ async function fetchOneUrl(url: string, source: string | undefined, force: boole
   }
 }
 
-interface IndexedFetchResult {
+export interface IndexedFetchResult {
   label: string;
   totalChunks: number;
   totalBytes: number;
   preview: string;
+  /** Set when the page carried no page-specific content and was not indexed. */
+  refusal?: string;
+  /** One line of extraction accounting, or undefined when nothing was classified. */
+  extraction?: string;
+}
+
+/**
+ * Map the subprocess's route line onto the typed route. Unknown or missing
+ * values read as "html" — the conservative direction, because it leaves
+ * template classification switched on rather than trusting an unverified
+ * document as site-authored.
+ */
+function parseFetchRoute(raw: string): FetchRoute {
+  if (raw === "markdown") return "markdown";
+  if (raw === "json") return "json";
+  if (raw === "text") return "text";
+  return "html";
+}
+
+/**
+ * Per-project store holding every fetched document whole, plus every block
+ * with its content/template label. Lives beside the FTS content DB so the
+ * existing cleanup and purge sweeps reach it.
+ */
+let _pageStore: PageStore | null = null;
+// Exported only for tests/session/fetch-page-store-path.test.ts, which
+// guards against getPageStore() ever regressing off getStorePath() and back
+// onto a profile/config-scoped path (see HANDOFF.md items 6-7).
+export function getPageStore(): PageStore {
+  if (!_pageStore) {
+    _pageStore = new PageStore(join(dirname(getStorePath()), "fetch-pages.db"));
+  }
+  return _pageStore;
 }
 
 /**
@@ -3738,31 +3781,99 @@ interface IndexedFetchResult {
  * fetched results and calls this one-at-a-time to avoid SQLite WAL contention
  * (PRD finding E).
  */
-function indexFetched(f: { url: string; source?: string; markdown: string; header: string }): IndexedFetchResult {
+export function indexFetched(f: { url: string; source?: string; markdown: string; header: string; route?: FetchRoute }): IndexedFetchResult {
   const store = getStore();
   // Storage label composed via composeFetchCacheKey so two URLs sharing a
   // `source` label do not overwrite each other (commit 1f1243e). ctx_search()
   // still finds both via LIKE-mode source filter on the `source` substring.
   const storageLabel = composeFetchCacheKey(f.source, f.url);
   const attribution = currentAttribution();
+  const route = f.route ?? "html";
+
+  // ── Template / content extraction ────────────────────────────────────
+  // The converter answered "what format". This answers "which part of the
+  // page". Chrome is what repeats across pages of the same host; content is
+  // what does not. The page is stored WHOLE either way — this pass only ever
+  // decides which blocks reach the search index.
+  let indexText = f.markdown;
+  let extraction: string | undefined;
+  let relabelled: Relabelled[] = [];
+  if (!routeSkipsExtraction(route)) {
+    try {
+      const outcome = extractAndStore({
+        url: f.url,
+        sourceLabel: storageLabel,
+        document: f.markdown,
+        route,
+        store: getPageStore(),
+      });
+      if (outcome.kind === "refuse") {
+        return {
+          label: storageLabel,
+          totalChunks: 0,
+          totalBytes: outcome.storedBytes,
+          preview: "",
+          refusal: outcome.reason,
+        };
+      }
+      indexText = outcome.indexText;
+      relabelled = outcome.relabelled;
+      if (route === "markdown") {
+        extraction =
+          `route: site-authored markdown (${outcome.storedBytes} B) — no extraction needed`;
+      } else if (outcome.provisional) {
+        extraction =
+          `route: converted HTML — first page seen from this host, so all ${outcome.totalBlocks} blocks ` +
+          `were indexed as content (PROVISIONAL); they are re-classified automatically when a second ` +
+          `page of this host is fetched`;
+      } else {
+        extraction =
+          `route: converted HTML — ${outcome.totalBlocks - outcome.templateBlocks}/${outcome.totalBlocks} ` +
+          `blocks indexed as content (${outcome.contentBytes} B); ${outcome.templateBlocks} blocks ` +
+          `(${outcome.templateBytes} B) were seen on other pages of this host, so they are labelled ` +
+          `template — stored whole, kept out of the index`;
+      }
+    } catch (err: unknown) {
+      // Extraction is an optimisation on top of a working fetch. If the block
+      // store cannot be opened, index the whole document exactly as before
+      // rather than losing the page — and say so instead of failing silently.
+      extraction =
+        `extraction unavailable (${err instanceof Error ? err.message : String(err)}) — indexed the full document`;
+      indexText = f.markdown;
+    }
+  }
+
   let indexed: IndexResult;
   if (f.header === "__CM_CT__:json") {
     indexed = store.indexJSON(f.markdown, storageLabel, undefined, attribution);
   } else if (f.header === "__CM_CT__:text") {
     indexed = store.indexPlainText(f.markdown, storageLabel, undefined, attribution);
   } else {
-    indexed = store.index({ content: f.markdown, source: storageLabel, attribution });
+    indexed = store.index({ content: indexText, source: storageLabel, attribution });
+  }
+  // A second page of a host resolves the cold-start labelling of every page
+  // that preceded it. store.index() replaces rows sharing a label, so this
+  // re-index swaps the provisional content for the classified content.
+  for (const prev of relabelled) {
+    try {
+      store.index({ content: prev.indexText, source: prev.sourceLabel, attribution });
+    } catch { /* a re-run failure leaves the earlier, larger index in place */ }
+  }
+  if (relabelled.length > 0) {
+    extraction = (extraction ? extraction + "; " : "") +
+      `re-classified ${relabelled.length} earlier page(s) of this host now that a second page exists`;
   }
   // Track AFTER the FTS5 write succeeds — failed indexes shouldn't inflate the counter.
   trackIndexed(Buffer.byteLength(f.markdown));
-  const preview = f.markdown.length > FETCH_PREVIEW_LIMIT
-    ? charSafePrefix(f.markdown, FETCH_PREVIEW_LIMIT) + "\n\n…[truncated — use ctx_search() for full content]"
-    : f.markdown;
+  const preview = indexText.length > FETCH_PREVIEW_LIMIT
+    ? charSafePrefix(indexText, FETCH_PREVIEW_LIMIT) + "\n\n…[preview window only — the full document is stored; use ctx_search() to retrieve any section]"
+    : indexText;
   return {
     label: indexed.label,
     totalChunks: indexed.totalChunks,
     totalBytes: Buffer.byteLength(f.markdown),
     preview,
+    extraction,
   };
 }
 
@@ -3900,7 +4011,17 @@ WHEN NOT: content is already local (use ctx_index) or the page is SPA-rendered (
         // network round-trip + re-indexed. Counted here so ctx_stats can
         // report nominal cache_hit_rate alongside the existing hit metrics.
         sessionStats.cacheMisses++;
-        finalized.push({ kind: "fetched", indexed: indexFetched(v) });
+        const indexed = indexFetched(v);
+        // Honest refusal. A page whose every block already exists on other
+        // pages of this host carried no page-specific content, and reporting
+        // that as a success would hand the caller a site shell dressed as an
+        // article. On an error the model tries another route; on a false
+        // success it stops looking.
+        if (indexed.refusal) {
+          finalized.push({ kind: "fetch_error", url: v.url, error: indexed.refusal, reason: "shell" });
+        } else {
+          finalized.push({ kind: "fetched", indexed });
+        }
       }
     }
 
@@ -3920,6 +4041,7 @@ WHEN NOT: content is already local (use ctx_index) or the page is SPA-rendered (
         const text = [
           `Fetched and indexed **${r.indexed.totalChunks} sections** (${totalKB}KB) from: ${r.indexed.label}`,
           `Full content indexed in sandbox — use ctx_search(queries: [...], source: "${r.indexed.label}") for specific lookups.`,
+          ...(r.indexed.extraction ? [r.indexed.extraction] : []),
           "",
           "---",
           "",
