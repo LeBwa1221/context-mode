@@ -368,14 +368,62 @@ flagging a shell only when BOTH hold. Checked by arithmetic, not by re-fetching:
 Both are now under the 200-byte floor and the 2 percent yield floor, so both return
 `fetch_error` with reason `shell` instead of reporting success.
 
-STILL OPEN: this makes the failure honest, it does NOT retrieve the page. `8476db7`
-(the `.md`-sibling and `llms.txt` ladder) is what actually recovers the Apple page,
-and it depends on `5b9c00c`'s block-classification engine. Both remain deliberate
-ports against our diverged store patterns, NOT cherry-picks - `git merge-tree` still
-reports conflicts in `src/server.ts` and `server.bundle.mjs`.
+Update 2026-08-21: the rest of the ladder has been ported. Item 9 is CLOSED
+apart from the two junk store entries noted at the end of this item.
+
+Phase 1, `395e017` feat(fetch): add block classification and page store,
+unwired - ported `src/fetch/blocks.ts` and `src/fetch/page-store.ts` verbatim
+from `5b9c00c`. 28 tests including the lossless invariant
+`reassemble(splitBlocks(x)) === x`.
+
+Phase 2, `707accd` + `5a510d4` - `src/fetch/extract.ts` plus the full route
+wire protocol. During this phase a real regression was caught before shipping:
+reconciling `indexFetched` alone would have run `extractAndStore` (a markdown
+block splitter) over raw JSON and text bodies, and an allTemplate verdict
+would have hit the refuse branch BEFORE `store.indexJSON` / `store.indexPlainText`,
+silently ending JSON indexing. Fixed by threading `route` end to end (`emit()`
+stdout line 2, `FetchOneResult.route`, `parseFetchRoute`, `fetchOneUrl`
+parsing) and covered by `tests/core/fetch-route-skip.test.ts`.
+
+Phase 3, `57b9ed1`, `9b3ab2e`, `fbdda74`, `413f589` - `Accept: text/markdown`
+content negotiation, rung 2 (`.md` sibling then `llms.txt`), the tool
+docstring, and the bundle rebuild.
+
+Parts most likely to be broken by a future change:
+
+- The happy path costs exactly ONE request. `tests/core/fetch-ladder-rungs.test.ts`
+  asserts `r.requests` equals `["/docs/view"]` when HTML converts to an
+  article. Rungs past 1 fire only when rung 1 came back empty.
+- Two acceptance traps are handled STRUCTURALLY, not by sniffing:
+  `isMachineReadable` requires status 200, a content-type not containing
+  "html", and a body not containing `<!doctype html` or `<html>`. It
+  deliberately does NOT check for a leading `#`, because
+  developer.apple.com serves its `.md` with an empty Content-Type and an
+  HTML comment first. angular.dev answers a missing `.md` with HTTP 200
+  plus the SPA shell, which the same check rejects.
+- `getPageStore()` resolves `join(dirname(getStorePath()), "fetch-pages.db")`
+  and therefore inherits our unified store root. Upstream's own
+  `getStorePath()` is the stale profile-scoped version and must never be
+  taken in a future merge. Guarded by
+  `tests/session/fetch-page-store-path.test.ts`, which was verified to
+  actually fail when `getPageStore` is pointed at a config dir.
+- Deliberately NOT ported: upstream's measurement scripts (one-off
+  diagnostics with hardcoded /tmp paths), and an unrelated
+  retrieval-marker/analytics hunk bundled into `8476db7` by squashed
+  history.
+- The docstring deliberately omits upstream's "4 of 36 pages" measurement
+  claim, because we did not re-run their measurement. Capability claims
+  match what shipped.
 
 `e31360d` (tool-description rewording) is deliberately skipped: it describes a
 fetch ladder we do not have.
+
+Remaining junk: the SPA-shell reproduction above created two store entries,
+`spa-test-excalidraw` and `spa-test-apple-swiftui`, that cannot be removed -
+`store.ts` only deletes a source as a side effect of re-indexing the same
+label (the `#stmtDeleteSourcesByLabel` dedup path), there is no exposed
+per-source deletion command. Add one before relying on being able to clean up
+a bad index entry.
 
 ## Standing warning: re-measure, do not trust prior numbers
 
