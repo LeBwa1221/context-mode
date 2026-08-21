@@ -253,6 +253,40 @@ revert and NOT in the test assertions, which are correct.
 WARNING for future capture: a run captured via `powershell.exe` (Windows PowerShell
 5.1) writes UTF-16LE and mangles vitest's unicode glyphs. Use `pwsh` (PowerShell 7).
 
+### 8. Scheduled post-migration review - on or after 2026-08-28
+
+Not urgent. This is the scheduled re-check of the 2026-08-21 store unification and
+migration (phases 1-4 of `docs/plan-store-unification.md`). Do not act on it early;
+the point is a week of normal use first.
+
+**1. Confirm the per-profile stores are frozen.**
+Phase 1 made hooks and the MCP server resolve one global store root for every
+provider. The legacy per-profile stores were deliberately left on disk as a third
+copy. Compare the newest mtimes under each `<config-dir>/context-mode/{sessions,content}`
+against the global root (`%LOCALAPPDATA%\context-mode` on win32). Only the global root
+should be moving. If a profile store is still being written to, phase 1 is incomplete
+for whichever adapter owns it.
+
+**2. Confirm the merged store is healthy.**
+Run `scripts/merge-stores.ts` with NO `--apply` - every group should report as already
+merged. Then spot-check `ctx_search` for content that previously existed only in a
+profile store.
+
+**3. Retire the backups, in this order.**
+Only once 1 and 2 pass: delete `C:\Projects\_store-backup-20260820-premerge` (5457
+files, ~670 MB, taken immediately before the phase 2 migration), then the per-profile
+`context-mode` store directories, which are redundant once the global store is
+confirmed authoritative.
+
+This is SEPARATE from the retention condition in item 1. That one concerns upstream
+issue #1024 and the legacy store at `~/.claude-devcom/context-mode/`, and it is
+unchanged - verified 2026-08-21 that upstream still has no fix.
+
+**4. Re-measure, do not assume.**
+The migration verified clean on 2026-08-21 (765 groups, all no-op on re-run, FTS
+intact, no duplicates or orphans, sources preserved). Re-run the checks rather than
+trusting that record - see the standing warning below.
+
 ## Standing warning: re-measure, do not trust prior numbers
 
 Every number and every "regression" label recorded in this history's past sessions
