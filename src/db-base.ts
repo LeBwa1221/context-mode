@@ -12,7 +12,7 @@ import { createRequire } from "node:module";
 import { existsSync, unlinkSync, renameSync, readdirSync, statSync, mkdirSync, copyFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { LEGACY_ADAPTER_HOME_SEGMENTS } from "./session/data-root.js";
+import { LEGACY_ADAPTER_HOME_SEGMENTS, LEGACY_ADAPTER_APPDATA_SEGMENTS } from "./session/data-root.js";
 // v1.0.130 — `acquireDbLock` + `locking_mode = EXCLUSIVE` were REMOVED.
 // See docs/adr/0001-sessiondb-multi-writer.md for the architectural
 // rationale. The short version: SessionDB is multi-writer-safe and the
@@ -761,6 +761,16 @@ export function adoptLargestLegacyDb(opts: {
   subdir: string;
   /** Basename to look for, e.g. `${projectHash}.db`. */
   fileName: string;
+  /**
+   * Windows %APPDATA% override for the LEGACY_ADAPTER_APPDATA_SEGMENTS scan
+   * below. Optional and explicit, not read from `process.env` here, so
+   * tests can supply a fake value instead of scanning the real profile's
+   * %APPDATA% — mirrors candidateLegacyRoots' `appData` parameter in
+   * scripts/merge-stores.ts. Defaults to the ambient env var (or the same
+   * homedir()-based fallback OpenCodeAdapter.getConfigDir uses) when
+   * omitted.
+   */
+  appData?: string;
   log?: (message: string) => void;
 }): boolean {
   const { newDbPath, subdir, fileName, log } = opts;
@@ -782,9 +792,12 @@ export function adoptLargestLegacyDb(opts: {
   // legacy roots in LEGACY_ADAPTER_HOME_SEGMENTS (src/session/data-root.ts -
   // shared with enumerateAdapterDirs) that the one-level scan structurally
   // cannot reach (.config/opencode, .config/JetBrains, .config/kilo,
-  // .config/zed). Does NOT cover vscode-copilot's project-relative .github
-  // store or any store relocated via a config-dir env var (CODEX_HOME,
-  // COPILOT_HOME, ...) outside $HOME - both are phase 2 work
+  // .config/zed), PLUS the Windows-only %APPDATA%-rooted roots in
+  // LEGACY_ADAPTER_APPDATA_SEGMENTS for adapters whose `.config/<name>`
+  // path above is wrong on Windows (kilo, opencode - see its doc comment).
+  // Does NOT cover vscode-copilot's project-relative .github store or any
+  // store relocated via a config-dir env var (CODEX_HOME, COPILOT_HOME,
+  // ...) outside $HOME - both are phase 2 work
   // (docs/plan-store-unification.md).
   const candidates: string[] = [];
   for (const entry of entries) {
@@ -794,6 +807,15 @@ export function adoptLargestLegacyDb(opts: {
   for (const [, segments] of LEGACY_ADAPTER_HOME_SEGMENTS) {
     if (segments.length < 2) continue; // already covered by the one-level scan above
     candidates.push(join(home, ...segments, "context-mode", subdir, fileName));
+  }
+  if (process.platform === "win32") {
+    // Same fallback as OpenCodeAdapter.getConfigDir (src/adapters/opencode/index.ts)
+    // so a Windows account without APPDATA set (service accounts, some CI
+    // images) still finds a store that adapter would have written there.
+    const appData = opts.appData ?? process.env.APPDATA ?? join(home, "AppData", "Roaming");
+    for (const [, segments] of LEGACY_ADAPTER_APPDATA_SEGMENTS) {
+      candidates.push(join(appData, ...segments, "context-mode", subdir, fileName));
+    }
   }
 
   const found: Array<{ path: string; size: number }> = [];

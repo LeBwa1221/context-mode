@@ -148,6 +148,14 @@ describe("candidateLegacyRoots / discoverGroups", () => {
     const roots = candidateLegacyRoots(home);
     expect(roots.some((r) => r.name === ".claude-ime")).toBe(true);
 
+    // Windows-only supplement: passing `appData` adds the %APPDATA%-rooted
+    // roots from LEGACY_ADAPTER_APPDATA_SEGMENTS (kilo, opencode) - must
+    // pass on every platform since `appData` here is just a string, never
+    // read from process.env.
+    const appDataRoots = candidateLegacyRoots(home, "/fake/appdata");
+    expect(appDataRoots.some((r) => r.base === join("/fake/appdata", "opencode", "context-mode"))).toBe(true);
+    expect(appDataRoots.some((r) => r.base === join("/fake/appdata", "kilo", "context-mode"))).toBe(true);
+
     const groups = discoverGroups(home, globalBase);
     const g = groups.find((x) => x.subdir === "sessions" && x.hash === hash);
     expect(g).toBeDefined();

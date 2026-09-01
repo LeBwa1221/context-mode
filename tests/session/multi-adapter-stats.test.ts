@@ -191,7 +191,12 @@ describe("Slice 2.1 — enumerateAdapterDirs()", () => {
 
   test("defaults to os.homedir() when no override passed", () => {
     const dirs = enumerateAdapterDirs();
-    expect(dirs.length).toBe(16);
+    // On win32 with a real %APPDATA%, two more entries (kilo, opencode)
+    // come from LEGACY_ADAPTER_APPDATA_SEGMENTS - see enumerateAdapterDirs'
+    // doc comment. Only fires with no explicit `home` override, same as
+    // real (non-test) usage.
+    const expectedCount = process.platform === "win32" && process.env.APPDATA ? 18 : 16;
+    expect(dirs.length).toBe(expectedCount);
     const expectedSuffix = sep + join("context-mode", "sessions");
     expect(dirs.every((d) => d.sessionsDir.includes(expectedSuffix))).toBe(true);
   });

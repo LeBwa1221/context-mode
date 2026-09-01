@@ -58,7 +58,11 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { createHash } from "node:crypto";
 import { loadDatabase, applyWALPragmas, closeDB } from "../src/db-base.js";
-import { LEGACY_ADAPTER_HOME_SEGMENTS, resolveContextModeDataRoot } from "../src/session/data-root.js";
+import {
+  LEGACY_ADAPTER_HOME_SEGMENTS,
+  LEGACY_ADAPTER_APPDATA_SEGMENTS,
+  resolveContextModeDataRoot,
+} from "../src/session/data-root.js";
 import { SessionDB } from "../src/session/db.js";
 import { ContentStore } from "../src/store.js";
 
@@ -74,8 +78,16 @@ interface CandidateRoot {
   base: string; // <root>/context-mode
 }
 
-/** Legacy candidate roots under `home` - same set adoptLargestLegacyDb scans. */
-export function candidateLegacyRoots(home: string): CandidateRoot[] {
+/**
+ * Legacy candidate roots under `home` - same set adoptLargestLegacyDb scans.
+ *
+ * `appData`, when supplied, adds the Windows-only `%APPDATA%`-rooted roots
+ * from LEGACY_ADAPTER_APPDATA_SEGMENTS (kilo, opencode - see its doc
+ * comment in src/session/data-root.ts). Optional and explicit, not read
+ * from `process.env` here, so this function stays pure/testable per the
+ * file header's SAFETY note; only main() below resolves the real value.
+ */
+export function candidateLegacyRoots(home: string, appData?: string): CandidateRoot[] {
   const roots: CandidateRoot[] = [];
   let entries: string[] = [];
   try {
@@ -90,6 +102,11 @@ export function candidateLegacyRoots(home: string): CandidateRoot[] {
   for (const [name, segments] of LEGACY_ADAPTER_HOME_SEGMENTS) {
     if (segments.length < 2) continue; // one-level entries already covered by the dotfile scan above
     roots.push({ name, base: join(home, ...segments, "context-mode") });
+  }
+  if (appData) {
+    for (const [name, segments] of LEGACY_ADAPTER_APPDATA_SEGMENTS) {
+      roots.push({ name, base: join(appData, ...segments, "context-mode") });
+    }
   }
   return roots;
 }
@@ -119,8 +136,8 @@ export interface Group {
 }
 
 /** Discover every `<hash>.db` under sessions/ and content/ across all legacy roots + the global root, grouped by (subdir, hash). */
-export function discoverGroups(home: string, globalBase: string): Group[] {
-  const roots: CandidateRoot[] = [...candidateLegacyRoots(home), { name: "global", base: globalBase }];
+export function discoverGroups(home: string, globalBase: string, appData?: string): Group[] {
+  const roots: CandidateRoot[] = [...candidateLegacyRoots(home, appData), { name: "global", base: globalBase }];
   const bySubdirHash = new Map<string, Group>();
   for (const subdir of ["sessions", "content"] as const) {
     for (const root of roots) {
@@ -665,8 +682,8 @@ export type AnyGroupReport = SessionsGroupReport | ContentGroupReport;
  * the global store already, or have already been fully folded in, are
  * skipped without opening a writable handle to anything.
  */
-export function runMigration(home: string, globalBase: string, opts: { apply: boolean }): AnyGroupReport[] {
-  const groups = discoverGroups(home, globalBase);
+export function runMigration(home: string, globalBase: string, opts: { apply: boolean }, appData?: string): AnyGroupReport[] {
+  const groups = discoverGroups(home, globalBase, appData);
   const reports: AnyGroupReport[] = [];
   for (const group of groups) {
     const hasLegacy = group.sources.some((s) => resolvePath(s.path) !== resolvePath(group.globalPath));
@@ -702,7 +719,11 @@ function main(): void {
   const apply = process.argv.includes("--apply");
   const home = homedir();
   const globalBase = join(resolveContextModeDataRoot(process.env, home), "context-mode");
-  const reports = runMigration(home, globalBase, { apply });
+  // Same fallback as OpenCodeAdapter.getConfigDir (src/adapters/opencode/index.ts)
+  // so a Windows account without APPDATA set (service accounts, some CI
+  // images) still finds a store that adapter would have written there.
+  const appData = process.platform === "win32" ? process.env.APPDATA || join(home, "AppData", "Roaming") : undefined;
+  const reports = runMigration(home, globalBase, { apply }, appData);
   console.log(formatReport(reports, apply));
   if (!apply) {
     console.log("\nDry run only - pass --apply to perform the merge.");

@@ -106,6 +106,12 @@ export function resolveContextModeDataRootOverride(
  * config-dir env var (CODEX_HOME, COPILOT_HOME, KIMI_CODE_HOME,
  * GEMINI_CLI_HOME, ...) relocated outside `$HOME` - both are phase 2 work
  * (see docs/plan-store-unification.md).
+ *
+ * The `.config/<name>` entries (kilo, opencode, zed, jetbrains-copilot) are
+ * XDG-style paths, correct on Linux/macOS but not a real convention on
+ * Windows. `kilo` and `opencode` are known to actually store under
+ * `%APPDATA%\<name>` there instead - see LEGACY_ADAPTER_APPDATA_SEGMENTS
+ * below, which supplements (does not replace) this table on win32.
  */
 export const LEGACY_ADAPTER_HOME_SEGMENTS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ["claude-code", [".claude"]],
@@ -125,4 +131,29 @@ export const LEGACY_ADAPTER_HOME_SEGMENTS: ReadonlyArray<readonly [string, reado
   ["opencode", [".config", "opencode"]],
   ["zed", [".config", "zed"]],
   ["jetbrains-copilot", [".config", "JetBrains"]],
+];
+
+/**
+ * Windows-only supplement to LEGACY_ADAPTER_HOME_SEGMENTS, keyed off
+ * `%APPDATA%` (Roaming) instead of `$HOME`. `kilo` and `opencode` store
+ * their legacy per-profile data under `%APPDATA%\<name>\context-mode` on
+ * Windows, not `home\.config\<name>\context-mode` - `.config` isn't a real
+ * Windows convention, so that entry in LEGACY_ADAPTER_HOME_SEGMENTS never
+ * matches anything there. Verified for `opencode` against a live
+ * `%APPDATA%\opencode\context-mode` store with real session data; `kilo`
+ * is kept even though it isn't installed on this machine, for parity with
+ * LEGACY_ADAPTER_HOME_SEGMENTS.
+ *
+ * Deliberately does NOT include `zed` or other `.config`-based entries
+ * above - they likely have the same Windows path problem, but nobody has
+ * verified their real Windows storage location, so guessing one here would
+ * risk silently pointing at the wrong directory. Add an entry only after
+ * confirming it on an actual Windows install.
+ *
+ * Callers union this in only on `process.platform === "win32"`, alongside
+ * LEGACY_ADAPTER_HOME_SEGMENTS, never in place of it.
+ */
+export const LEGACY_ADAPTER_APPDATA_SEGMENTS: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ["kilo", ["kilo"]],
+  ["opencode", ["opencode"]],
 ];

@@ -17,6 +17,10 @@ process.env.HOME = fakeHome;
 process.env.USERPROFILE = fakeHome;
 process.env.HOMEDRIVE = root.replace(/[\\/]+$/, "");
 process.env.HOMEPATH = fakeHome.slice(root.length) || root;
+// Isolate %APPDATA% too, so win32-only code paths that read it ambiently
+// (see LEGACY_ADAPTER_APPDATA_SEGMENTS consumers) never touch the real
+// developer profile - only a fixture inside fakeHome.
+process.env.APPDATA = join(fakeHome, "AppData", "Roaming");
 
 // Prevent CONTEXT_MODE_BRIDGE_DEPTH from leaking in when Pi's MCP child
 // spawned with depth=1 and that env persisted into the test runner.

@@ -17,7 +17,7 @@ import { loadDatabase as loadDatabaseImpl } from "../db-base.js";
 import { ensureSessionEventsSchema } from "./db.js";
 import { resolveClaudeConfigDir } from "../util/claude-config.js";
 import { resolveContextModeDataRoot } from "../adapters/base.js";
-import { LEGACY_ADAPTER_HOME_SEGMENTS } from "./data-root.js";
+import { LEGACY_ADAPTER_HOME_SEGMENTS, LEGACY_ADAPTER_APPDATA_SEGMENTS } from "./data-root.js";
 import { estimateTokens } from "./token-estimate.js";
 
 /** Clamp a percentage into [0, 100] — a savings ratio must never report above 100%. */
@@ -692,6 +692,28 @@ export function enumerateAdapterDirs(opts?: {
     };
   });
 
+  // Windows-only supplement: kilo/opencode store under %APPDATA%\<name>,
+  // not home\.config\<name> (see LEGACY_ADAPTER_APPDATA_SEGMENTS's doc
+  // comment in data-root.ts). Only consulted when `home` wasn't explicitly
+  // overridden, mirroring the claudeConfigDir fallback above - keeps the
+  // function pure/testable against a caller-supplied home.
+  const appDataLegacy: AdapterDirEntry[] = [];
+  if (!opts?.home && process.platform === "win32") {
+    // Same fallback as OpenCodeAdapter.getConfigDir (src/adapters/opencode/index.ts)
+    // so a Windows account without APPDATA set (service accounts, some CI
+    // images) still surfaces a store that adapter would have written there.
+    const appData = process.env.APPDATA || join(home, "AppData", "Roaming");
+    for (const [name, segments] of LEGACY_ADAPTER_APPDATA_SEGMENTS) {
+      const base = join(appData, ...segments, "context-mode");
+      appDataLegacy.push({
+        name,
+        names: [name],
+        sessionsDir: join(base, "sessions"),
+        contentDir: join(base, "content"),
+      });
+    }
+  }
+
   const globalBase = join(resolveContextModeDataRoot(process.env, opts?.home), "context-mode");
   const globalEntry: AdapterDirEntry = {
     name: "context-mode",
@@ -700,7 +722,7 @@ export function enumerateAdapterDirs(opts?: {
     contentDir: join(globalBase, "content"),
   };
 
-  return dedupeAdapterDirsByPath([...legacy, globalEntry]);
+  return dedupeAdapterDirsByPath([...legacy, ...appDataLegacy, globalEntry]);
 }
 
 /** Merge entries whose `sessionsDir` resolves to the identical path — see enumerateAdapterDirs' doc comment. First-encountered name wins as the primary `name`. */
@@ -1701,8 +1723,12 @@ export interface MultiAdapterLifetimeStats {
 /**
  * Decide, per project-DB filename (`<hash>.db`), which adapter dir's copy
  * to count when the SAME filename exists in more than one dir. Returns a
- * map from adapter `name` to the set of filenames that dir must EXCLUDE
- * (because a different dir holds the copy actually being counted).
+ * map from adapter dir `sessionsDir` to the set of filenames that dir must
+ * EXCLUDE (because a different dir holds the copy actually being counted).
+ * Keyed on `sessionsDir` rather than `name` because two dirs can now share
+ * a `name` (LEGACY_ADAPTER_APPDATA_SEGMENTS' Windows entries reuse
+ * "kilo"/"opencode" from LEGACY_ADAPTER_HOME_SEGMENTS on purpose — see
+ * enumerateAdapterDirs) while `sessionsDir` stays unique per entry post-dedup.
  *
  * Does NOT assume the global root ("context-mode" entry) is a strict
  * superset of any legacy copy. That assumption was measured false in the
@@ -1729,7 +1755,7 @@ function resolveAuthoritativeProjectFiles(
   dirs: AdapterDirEntry[],
   loadDb: () => unknown,
 ): ReadonlyMap<string, ReadonlySet<string>> {
-  const byFile = new Map<string, Array<{ dirName: string; path: string }>>();
+  const byFile = new Map<string, Array<{ dirName: string; sessionsDir: string; path: string }>>();
   for (const dir of dirs) {
     if (!existsSync(dir.sessionsDir)) continue;
     let files: string[];
@@ -1740,16 +1766,16 @@ function resolveAuthoritativeProjectFiles(
     }
     for (const f of files) {
       const arr = byFile.get(f) ?? [];
-      arr.push({ dirName: dir.name, path: join(dir.sessionsDir, f) });
+      arr.push({ dirName: dir.name, sessionsDir: dir.sessionsDir, path: join(dir.sessionsDir, f) });
       byFile.set(f, arr);
     }
   }
 
   const excludeByDir = new Map<string, Set<string>>();
-  const exclude = (dirName: string, file: string) => {
-    const set = excludeByDir.get(dirName) ?? new Set<string>();
+  const exclude = (sessionsDir: string, file: string) => {
+    const set = excludeByDir.get(sessionsDir) ?? new Set<string>();
     set.add(file);
-    excludeByDir.set(dirName, set);
+    excludeByDir.set(sessionsDir, set);
   };
 
   for (const [file, copies] of byFile) {
@@ -1795,7 +1821,7 @@ function resolveAuthoritativeProjectFiles(
     }
 
     for (const copy of copies) {
-      if (copy.dirName !== winner.dirName) exclude(copy.dirName, file);
+      if (copy.sessionsDir !== winner.sessionsDir) exclude(copy.sessionsDir, file);
     }
   }
 
@@ -1830,7 +1856,7 @@ export function getMultiAdapterLifetimeStats(opts?: {
 
   for (const entry of dirs) {
     if (!existsSync(entry.sessionsDir)) continue; // only surface adapters with a sessions dir
-    const r = scanOneAdapter(entry, loadDb, filter, excludeByDir.get(entry.name));
+    const r = scanOneAdapter(entry, loadDb, filter, excludeByDir.get(entry.sessionsDir));
     perAdapter.push(r);
     totalEvents   += r.eventCount;
     totalSessions += r.sessionCount;
@@ -1880,7 +1906,7 @@ export function getMultiAdapterRealBytesStats(opts?: {
       sessionId: opts?.sessionId,
       worktreeHash: opts?.worktreeHash,
       loadDatabase: opts?.loadDatabase,
-      excludeFiles: excludeByDir.get(entry.name),
+      excludeFiles: excludeByDir.get(entry.sessionsDir),
     });
     // ARCH-REVIEW-V134-ABC SLICE C: aggregate this adapter's content DB
     // bytes into the lifetime sum. `getRealBytesStats` operates on
