@@ -259,6 +259,12 @@ Not urgent. This is the scheduled re-check of the 2026-08-21 store unification a
 migration (phases 1-4 of `docs/plan-store-unification.md`). Do not act on it early;
 the point is a week of normal use first.
 
+**EXECUTED 2026-09-01. RESULT: FAILED.** The pre-merge backup at
+`C:\Projects\_store-backup-20260820-premerge` and the per-profile stores must all
+be RETAINED. Step 3 below (retiring the backups) is explicitly NOT authorized.
+Findings A through F below are new, measured 2026-09-01; the four sub-steps are
+kept as originally written, each annotated with its outcome.
+
 **1. Confirm the per-profile stores are frozen.**
 Phase 1 made hooks and the MCP server resolve one global store root for every
 provider. The legacy per-profile stores were deliberately left on disk as a third
@@ -266,6 +272,12 @@ copy. Compare the newest mtimes under each `<config-dir>/context-mode/{sessions,
 against the global root (`%LOCALAPPDATA%\context-mode` on win32). Only the global root
 should be moving. If a profile store is still being written to, phase 1 is incomplete
 for whichever adapter owns it.
+
+OUTCOME (2026-09-01): NOT confirmed frozen for two profiles. See Finding A and
+Finding B below - `.claude-devcom` and `.claude-ime` were running pre-fix code
+behind a stale version stamp, and several profiles carried a duplicate plugin
+registration capable of writing profile-scoped stores independently of this
+fork's code.
 
 **2. Confirm the merged store is healthy.**
 Run `scripts/merge-stores.ts` with NO `--apply` - every group should report as already
@@ -280,6 +292,9 @@ dates could not have come from the pre-merge global copy. This is strong evidenc
 rather than proof: it was not established that those exact rows were among the
 stranded set. Re-run the check anyway.
 
+OUTCOME (2026-09-01): FAILED. Today's dry run still shows rows the global store
+does not have. See Finding D below for the group counts.
+
 **3. Retire the backups, in this order.**
 Only once 1 and 2 pass: delete `C:\Projects\_store-backup-20260820-premerge` (5457
 files, ~670 MB, taken immediately before the phase 2 migration), then the per-profile
@@ -290,10 +305,137 @@ This is SEPARATE from the retention condition in item 1. That one concerns upstr
 issue #1024 and the legacy store at `~/.claude-devcom/context-mode/`, and it is
 unchanged - verified 2026-08-21 that upstream still has no fix.
 
+OUTCOME (2026-09-01): NOT EXECUTED. Explicitly not authorized - step 2 did not
+pass. The backup and every per-profile store remain in place.
+
 **4. Re-measure, do not assume.**
 The migration verified clean on 2026-08-21 (765 groups, all no-op on re-run, FTS
 intact, no duplicates or orphans, sources preserved). Re-run the checks rather than
 trusting that record - see the standing warning below.
+
+OUTCOME (2026-09-01): Re-measured as scheduled, not assumed. Result: FAILED, per
+Findings A through D below. Findings E and F are unrelated cleanup found during
+the same pass; Finding G is an additional result surfaced by the same dry run
+that produced Finding D.
+
+**New findings, all measured 2026-09-01:**
+
+**Finding A - version-string trap. FIXED.** `.claude-plugin/plugin.json` was
+bumped to 2.0.0 on 2026-08-19 09:43 (commit `7f61931`). The store-unification fix
+landed later, 2026-08-20 12:18 (commit `958397a`). Profiles `.claude-devcom`
+(installed 2026-08-19 10:22) and `.claude-ime` (installed 2026-08-19 11:27)
+fetched inside that window, so their caches were stamped `2.0.0` while holding
+pre-fix code. Because the marketplace entry pins no `ref` and the updater
+compares version strings rather than commits, `/plugin` reported "already at the
+latest version (2.0.0)" indefinitely and never refetched. Proven by SHA256 of
+`hooks/session-db.bundle.mjs`: devcom and ime held `CC1495A2E6EAB8A8`, while
+`.claude-personal`, `.claude-observix`, and the repo build all held
+`CE90895FD66FF7E5`. Resolved on 2026-09-01 by renaming both stale cache
+directories to `2.0.0.stale-20260901` and reinstalling; both now hash
+`CE90895FD66FF7E5`. Note for the record: `claude plugin install` and `claude
+plugin update` both still reported "already installed" and "already at the
+latest version" during that reinstall, and the refetch happened only because the
+cache directory was absent. A version bump to 2.0.1 is still recommended so that
+other machines trapped in the same window can recover without a manual cache
+rename.
+
+**Finding B - duplicate plugin registration. CLEARED.** Several profiles had
+both `context-mode@dskrypnyk` and `context-mode@context-mode` enabled at once,
+the latter being a stale 1.0.169 upstream install from 2026-07-23 that predated
+the fork's addition on 2026-08-24. Both register the same MCP namespace, which
+hid the duplication. The stale server honoured `CLAUDE_CONFIG_DIR` and so wrote
+profile-scoped stores. It was the user's own leftover, not installed by the
+dskrypnyk-claude-kit. Cleared on 2026-09-01: the flags and old caches are gone
+from every profile.
+
+**Finding C - merge-script blind spot. FIXED.**
+`LEGACY_ADAPTER_HOME_SEGMENTS` in `src/session/data-root.ts:110-128` was
+platform-blind. Its entries `["kilo", [".config", "kilo"]]` and `["opencode",
+[".config", "opencode"]]` (lines 124-125) resolve to XDG paths that are correct
+on Linux and macOS but were wrong on Windows, where the real store is under
+`%APPDATA%`. Consequence before the fix: `C:\Users\denys.skrypnyk\AppData\Roaming\opencode\context-mode`
+holds 2968 .db files, 1232 of them with rows (session_events 2688, session_meta
+1232, session_resume 672), and `scripts/merge-stores.ts` had never once seen it.
+Every merge and count number recorded to date had been computed without it.
+
+Fixed 2026-09-01 by adding a new exported `LEGACY_ADAPTER_APPDATA_SEGMENTS` in
+`src/session/data-root.ts`, covering kilo and opencode, that all three
+consumers now consult on win32: `candidateLegacyRoots()` in
+`scripts/merge-stores.ts`, `adoptLargestLegacyDb` in `src/db-base.ts`, and
+`enumerateAdapterDirs` in `src/session/analytics.ts`. `candidateLegacyRoots`,
+`discoverGroups`, and `runMigration` gained optional trailing `appData`
+parameters so that only `main()` reads ambient environment. One test
+assertion in `tests/session/multi-adapter-stats.test.ts` changed from 16 to 18
+entries on win32. `npm run build` passes, including `assert-bundle` and
+`assert-asymmetric-drift`. Three bundles were rebuilt: `server.bundle.mjs`,
+`cli.bundle.mjs`, `hooks/session-db.bundle.mjs`.
+
+The change is UNSTAGED and UNREVIEWED as of this writing, and a code review is
+in progress. Remaining entries other than kilo and opencode, notably `zed` and
+`jetbrains-copilot`, are still unverified on Windows and were deliberately not
+guessed at.
+
+**Finding D - unmerged data remains, numbers superseded 2026-09-01.** A
+post-fix dry run (after the Finding C fix, still unmerged) now reports 3530
+groups, up from 562, because opencode is enumerated for the first time. Of
+those, 1244 groups have a positive delta, totalling 13,738 rows that would be
+added to the global store: session_events 11086, session_meta 1849,
+session_resume 677, tool_calls 126. Only 13 groups have more than one legacy
+source. Per-root figures, upper bound meaning the full delta credited to each
+source and lower bound meaning the delta split evenly across a group's legacy
+sources:
+
+- `.claude-devcom`, 5 positive groups, upper 8799, lower 4865
+- `.claude-ime`, 9 positive groups, upper 5724, lower 1790
+- `.claude-observix`, 2 positive groups, upper 5321, lower 1387
+- `.claude-personal`, 1 positive group, upper 4646, lower 1162
+- `AppData\Roaming\opencode`, 1232 positive groups, 4536 exactly, never
+  multi-source so the bounds coincide
+- `.codex`, 0 positive groups, 0 rows
+
+opencode accounts for 33 percent of all unmerged rows; the four `.claude-*`
+roots together account for the other 67 percent. Check 2 of this item still
+FAILS.
+
+**Finding E - scaffolding removed.** `C:\Users\denys.skrypnyk\.vscode\context-mode`
+(174 dbs, every one exactly 53,248 bytes, zero rows) and
+`C:\Users\denys.skrypnyk\.config\JetBrains\context-mode` (15 dbs, every one
+exactly 4,096 bytes, zero rows) were empty scaffolding for tools that never
+populated them. On 2026-09-01 both were moved to
+`%TEMP%\claude\removed-scaffold-20260901\`, not hard-deleted. The weekly temp
+sweep clears that location after 7 days.
+
+**Finding F - kilo dropped deliberately; opencode was a near miss.**
+`C:\Users\denys.skrypnyk\AppData\Roaming\kilo\context-mode` was deleted to the
+Recycle Bin at 06:45 on 2026-09-01 by something outside this work. Its row
+counts were never measured. The user confirmed kilo is not installed and the
+directory is being left dropped on purpose. No recovery is planned.
+
+Separately, the sibling `%APPDATA%\opencode\context-mode` store, 404 MB, was
+also deleted to the Recycle Bin, at 06:51 on 2026-09-01, by something outside
+this work and never identified. It was noticed only because the post-fix dry
+run found no opencode data. The user restored it from the Recycle Bin the
+same day and it came back intact, 2968 db files, 404.9 MB. This was a near
+miss: this store held the single largest block of unmerged data in the whole
+migration (see Finding D) and was briefly the only copy, in the Recycle Bin,
+while invisible to the tooling.
+
+**Finding G - `.codex` is fully merged.** Its delta is zero in all four
+columns in every group it appears in, including the one multi-source group it
+participates in, verified by spot-check against the dry-run output. It is the
+only legacy root retirable on data grounds alone today. Retiring it is a
+separate decision that has not been taken, and nothing else has been retired.
+
+**Before item 8 can be retried and closed:**
+1. Review and commit the Finding C resolver fix - it is written and builds
+   cleanly, but is unstaged and unreviewed, so landing it means review plus
+   commit, not just re-running the dry run.
+2. Run the actual merge, not just the dry run - the dry run has already been
+   re-run post-fix and still shows unmerged data (Finding D), so the
+   remaining blocker is the merge itself, not visibility into it.
+3. Only then retire the backup and the per-profile stores, subject to item 1's
+   separate retention still being satisfied.
+4. Optionally bump the fork to 2.0.1 for the benefit of other machines.
 
 ### 9. ctx_fetch_and_index silently indexes empty SPA shells
 
