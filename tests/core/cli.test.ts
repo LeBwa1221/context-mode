@@ -3944,17 +3944,18 @@ describe("PR #620 slice 4 — doctor() surfaces persistence-tier bug class", () 
 
   it("doctor warns on stale `.mcp.json` files in cache version dirs (#609 proactive)", () => {
     const body = doctorBody();
-    // Must reference the cache plugin path shape that PR #620 sweeps.
-    // The path nests `context-mode/context-mode` (marketplace/plugin
-    // nesting per ISSUE-609-VERDICT path examples). cli.ts uses
-    // path.join() so the literal appears as adjacent string args:
-    //   join(homedir(), ".claude", "plugins", "cache",
-    //        "context-mode", "context-mode")
-    // We assert on both the cache anchor segments AND the join args
+    // Must reference the cache plugin path shape that PR #620 sweeps:
+    // plugins/cache/<marketplace>/<plugin>/<version>. The <marketplace>
+    // segment is whichever marketplace the plugin was added from, so the
+    // scan enumerates the cache parent instead of hardcoding the upstream
+    // `context-mode/context-mode` pair — that literal made this check
+    // report SKIP on every fork served from another marketplace.
     // (Mert standing rule — use platform-neutral path joins, not literal
-    // separators that fail on Windows).
+    // separators that fail on Windows.)
     expect(body).toMatch(/"plugins"\s*,\s*"cache"/);
-    expect(body).toMatch(/"context-mode"\s*,\s*"context-mode"/);
+    expect(body).toMatch(/readdirSync\(cacheParent\)/);
+    expect(body).toMatch(/join\(cacheParent,\s*marketplace,\s*"context-mode"\)/);
+    expect(body).not.toMatch(/"context-mode"\s*,\s*"context-mode"/);
     // Must check for `.mcp.json` (the file that should not exist after
     // PR #620's architectural untrack — ISSUE-609-VERDICT §H1 → PR #618 → #620).
     const anchorIdx = body.indexOf("#609");

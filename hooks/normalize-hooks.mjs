@@ -15,16 +15,9 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
+import { UPSTREAM_CACHE_PREFIX, cachePluginPrefix, escapeRe } from "./cache-layout.mjs";
 
 const PLACEHOLDER = "${CLAUDE_PLUGIN_ROOT}";
-
-// #604: matches a cache path segment `context-mode/context-mode/<version>`.
-// Capture group is the X.Y.Z version. Used to detect command paths frozen on a
-// previous-version dir that Claude Code's native plugin manager has since
-// cleaned up. `/g` so a single content blob with multiple stale references is
-// fully covered. Forward-slash only — callers convert beforehand.
-const CACHE_VERSION_RE =
-  /context-mode\/context-mode\/([0-9]+\.[0-9]+\.[0-9]+)(?=\/)/g;
 
 /** Convert any path string to forward slashes (MSYS-safe). */
 function fwd(p) {
@@ -32,17 +25,40 @@ function fwd(p) {
 }
 
 /**
- * Extract the X.Y.Z version segment from a pluginRoot under the context-mode
+ * #604 anchor for `pluginRoot`: the `<marketplace>/<plugin>` segment pair this
+ * install actually lives under, plus a `/g` regex capturing the X.Y.Z version
+ * that follows it. Used to detect command paths frozen on a previous-version
+ * dir that Claude Code's native plugin manager has since cleaned up.
+ *
+ * The pair used to be hardcoded to `context-mode/context-mode`. That is only
+ * the upstream marketplace's name; a fork served from another marketplace
+ * installs under that name, and the literal then matches nothing, so the whole
+ * #604 heal silently no-ops. Falls back to the upstream pair for install
+ * shapes with no cache path at all (npm-global, dev checkout) — those have no
+ * version dir to be stale against either way.
+ *
+ * Forward-slash only — callers convert beforehand.
+ */
+function cacheSegment(pluginRoot) {
+  const prefix = cachePluginPrefix(pluginRoot) ?? UPSTREAM_CACHE_PREFIX;
+  return {
+    prefix,
+    re: new RegExp(`${escapeRe(prefix)}/([0-9]+\\.[0-9]+\\.[0-9]+)(?=/)`, "g"),
+  };
+}
+
+/**
+ * Extract the X.Y.Z version segment from a pluginRoot under this install's
  * cache layout. Returns null when running from npm-global, a dev checkout, or
- * any layout that does not match the `<…>/context-mode/context-mode/<v>(/…)?`
- * pattern — callers must treat null as "no stale-path check is possible".
+ * any layout that does not match `<…>/<marketplace>/<plugin>/<v>(/…)?` —
+ * callers must treat null as "no stale-path check is possible".
  */
 function pluginRootVersion(pluginRoot) {
   if (!pluginRoot) return null;
-  const m =
-    /context-mode\/context-mode\/([0-9]+\.[0-9]+\.[0-9]+)(?:\/|$)/.exec(
-      fwd(pluginRoot),
-    );
+  const { prefix } = cacheSegment(pluginRoot);
+  const m = new RegExp(
+    `${escapeRe(prefix)}/([0-9]+\\.[0-9]+\\.[0-9]+)(?:/|$)`,
+  ).exec(fwd(pluginRoot));
   return m ? m[1] : null;
 }
 
@@ -52,12 +68,12 @@ function pluginRootVersion(pluginRoot) {
  * / plugin.json carrying a previous version's absolute paths forward into a
  * newer version's cache directory after Claude Code's auto-update.
  */
-function hasStaleCacheVersionSegment(content, currentVersion) {
+function hasStaleCacheVersionSegment(content, currentVersion, re) {
   if (!currentVersion || !content || typeof content !== "string") return false;
   const safe = fwd(content);
-  CACHE_VERSION_RE.lastIndex = 0;
+  re.lastIndex = 0;
   let m;
-  while ((m = CACHE_VERSION_RE.exec(safe)) !== null) {
+  while ((m = re.exec(safe)) !== null) {
     if (m[1] !== currentVersion) return true;
   }
   return false;
@@ -100,7 +116,11 @@ export function isSourceCheckout(pluginRoot) {
 export function needsHookNormalization(content, pluginRoot) {
   if (!content || typeof content !== "string") return false;
   if (content.includes(PLACEHOLDER)) return true;
-  return hasStaleCacheVersionSegment(content, pluginRootVersion(pluginRoot));
+  return hasStaleCacheVersionSegment(
+    content,
+    pluginRootVersion(pluginRoot),
+    cacheSegment(pluginRoot).re,
+  );
 }
 
 /**
@@ -117,6 +137,7 @@ export function normalizeHooksJson(content, nodePath, pluginRoot) {
   const safeNode = fwd(nodePath);
   const safeRoot = fwd(pluginRoot);
   const currentVersion = pluginRootVersion(pluginRoot);
+  const segment = cacheSegment(pluginRoot);
 
   let parsed;
   try {
@@ -141,7 +162,7 @@ export function normalizeHooksJson(content, nodePath, pluginRoot) {
         const hasPlaceholder = h.command.includes(PLACEHOLDER);
         // #604: also rewrite when the command holds a stale absolute path under
         // a previous-version cache dir (Claude Code's auto-update ratchet).
-        const hasStale = hasStaleCacheVersionSegment(h.command, currentVersion);
+        const hasStale = hasStaleCacheVersionSegment(h.command, currentVersion, segment.re);
         if (!hasPlaceholder && !hasStale) continue;
 
         let next = h.command;
@@ -153,12 +174,12 @@ export function normalizeHooksJson(content, nodePath, pluginRoot) {
           next = next.replace(/^\s*node\s+/, `"${safeNode}" `);
         }
         if (hasStale) {
-          // Re-point every `context-mode/context-mode/<old-version>/…` segment
+          // Re-point every `<marketplace>/<plugin>/<old-version>/…` segment
           // to the current pluginRoot's version. Operates on the forward-slash
           // form so MSYS-mangled paths heal as well.
           next = fwd(next).replace(
-            CACHE_VERSION_RE,
-            `context-mode/context-mode/${currentVersion}`,
+            segment.re,
+            `${segment.prefix}/${currentVersion}`,
           );
         }
         h.command = next;
@@ -187,6 +208,7 @@ export function normalizePluginJson(content, nodePath, pluginRoot) {
   const safeNode = fwd(nodePath);
   const safeRoot = fwd(pluginRoot);
   const currentVersion = pluginRootVersion(pluginRoot);
+  const segment = cacheSegment(pluginRoot);
 
   let parsed;
   try {
@@ -212,10 +234,10 @@ export function normalizePluginJson(content, nodePath, pluginRoot) {
           next = next.replaceAll(PLACEHOLDER, safeRoot);
         }
         // #604: same auto-update ratchet hits plugin.json args (see #523).
-        if (hasStaleCacheVersionSegment(next, currentVersion)) {
+        if (hasStaleCacheVersionSegment(next, currentVersion, segment.re)) {
           next = fwd(next).replace(
-            CACHE_VERSION_RE,
-            `context-mode/context-mode/${currentVersion}`,
+            segment.re,
+            `${segment.prefix}/${currentVersion}`,
           );
         }
         return next;

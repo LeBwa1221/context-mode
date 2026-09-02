@@ -137,11 +137,17 @@ await runHook(async () => {
     const { resolveConfigDir } = await import("./session-helpers.mjs");
 
     // Read the version this MCP boot is running under. PLUGIN_ROOT
-    // points at ~/.claude/plugins/cache/context-mode/context-mode/<vX>/.
+    // points at ~/.claude/plugins/cache/<marketplace>/<plugin>/<vX>/.
+    const { dirname } = await import("node:path");
     let currentVersion = null;
+    let pluginCacheRoot = null;
     try {
       const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT
         ?? resolve(HOOK_DIR, "..");
+      // The parent of the version dir IS the <marketplace>/<plugin> pair the
+      // snapshot rewrite anchors on. Derived, never hardcoded — the
+      // marketplace segment differs per fork.
+      pluginCacheRoot = dirname(resolve(pluginRoot));
       const manifestPath = resolve(pluginRoot, ".claude-plugin", "plugin.json");
       const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
       if (typeof manifest?.version === "string" && manifest.version) {
@@ -151,13 +157,6 @@ await runHook(async () => {
 
     if (currentVersion) {
       const snapshotsDir = resolve(resolveConfigDir(), "shell-snapshots");
-      const pluginCacheRoot = resolve(
-        resolveConfigDir(),
-        "plugins",
-        "cache",
-        "context-mode",
-        "context-mode",
-      );
       selfHealShellSnapshots({
         snapshotsDir,
         pluginCacheRoot,

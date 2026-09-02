@@ -129,6 +129,7 @@ import {
 import { join, dirname, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
+import { UPSTREAM_CACHE_PREFIX, cachePluginPrefix, escapeRe } from "./cache-layout.mjs";
 
 /**
  * Cheap-probe partial-install detection. Runs on every session start, so
@@ -332,9 +333,19 @@ function rewritePluginJsonArgs(pluginRoot) {
   if (!servers || typeof servers !== "object") return false;
 
   const safeRoot = String(pluginRoot).replace(/\\/g, "/");
-  const versionM = /context-mode\/context-mode\/([0-9]+\.[0-9]+\.[0-9]+)(?:\/|$)/.exec(safeRoot);
+  // Anchor on the `<marketplace>/<plugin>` pair this install actually lives
+  // under, not the upstream `context-mode/context-mode` literal — the
+  // marketplace segment differs per fork and a stale literal matches nothing.
+  const cachePrefix = cachePluginPrefix(pluginRoot) ?? UPSTREAM_CACHE_PREFIX;
+  const escapedPrefix = escapeRe(cachePrefix);
+  const versionM = new RegExp(
+    `${escapedPrefix}/([0-9]+\\.[0-9]+\\.[0-9]+)(?:/|$)`,
+  ).exec(safeRoot);
   const currentVersion = versionM ? versionM[1] : null;
-  const STALE_VERSION_RE = /context-mode\/context-mode\/([0-9]+\.[0-9]+\.[0-9]+)(?=\/)/g;
+  const STALE_VERSION_RE = new RegExp(
+    `${escapedPrefix}/([0-9]+\\.[0-9]+\\.[0-9]+)(?=/)`,
+    "g",
+  );
   const PLACEHOLDER = "${CLAUDE_PLUGIN_ROOT}";
 
   let mutated = false;
@@ -362,7 +373,7 @@ function rewritePluginJsonArgs(pluginRoot) {
         if (hasStale) {
           next = fwd.replace(
             STALE_VERSION_RE,
-            `context-mode/context-mode/${currentVersion}`,
+            `${cachePrefix}/${currentVersion}`,
           );
         }
       }

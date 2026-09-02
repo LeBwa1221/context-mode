@@ -414,34 +414,45 @@ export class ClaudeCodeAdapter extends ClaudeCodeBaseAdapter implements HookAdap
     // assumption baked into a version-detection path; a user running a
     // non-default CLAUDE_CONFIG_DIR profile should never have this silently
     // fall through to a DIFFERENT profile's plugin cache.
-    const bases = [this.getConfigDir()];
-    for (const base of bases) {
-      const cacheDir = resolve(
-        base,
-        "plugins",
-        "cache",
-        "context-mode",
-        "context-mode",
+    //
+    // The marketplace segment is whichever marketplace the plugin was added
+    // from, not the plugin's own name. Hardcoding the upstream
+    // `context-mode/context-mode` pair made this scan read a directory that
+    // does not exist on a fork served from any other marketplace: readdirSync
+    // threw, the catch swallowed it, and a running install reported "not
+    // installed". Enumerate the marketplaces instead — read-only, so covering
+    // a legacy upstream install alongside the fork's is strictly better.
+    const cacheParent = resolve(this.getConfigDir(), "plugins", "cache");
+    let cacheDirs: string[] = [];
+    try {
+      cacheDirs = readdirSync(cacheParent).map((marketplace) =>
+        resolve(cacheParent, marketplace, "context-mode"),
       );
+    } catch {
+      return "not installed";
+    }
+
+    const versions: string[] = [];
+    for (const cacheDir of cacheDirs) {
       try {
-        const entries = readdirSync(cacheDir);
-        const versions = entries
-          .filter((e) => /^\d+\.\d+\.\d+/.test(e))
-          .sort((a, b) => {
-            const pa = a.split(".").map(Number);
-            const pb = b.split(".").map(Number);
-            for (let i = 0; i < 3; i++) {
-              if ((pa[i] ?? 0) !== (pb[i] ?? 0))
-                return (pa[i] ?? 0) - (pb[i] ?? 0);
-            }
-            return 0;
-          });
-        if (versions.length > 0) return versions[versions.length - 1];
+        for (const e of readdirSync(cacheDir)) {
+          if (/^\d+\.\d+\.\d+/.test(e)) versions.push(e);
+        }
       } catch {
-        /* continue */
+        /* marketplace has no context-mode install — continue */
       }
     }
-    return "not installed";
+    versions.sort((a, b) => {
+      const pa = a.split(".").map(Number);
+      const pb = b.split(".").map(Number);
+      for (let i = 0; i < 3; i++) {
+        if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
+      }
+      return 0;
+    });
+    return versions.length > 0
+      ? versions[versions.length - 1]
+      : "not installed";
   }
 
   // ── Upgrade ────────────────────────────────────────────

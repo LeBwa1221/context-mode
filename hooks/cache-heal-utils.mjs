@@ -34,6 +34,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import { join } from "node:path";
+import { UPSTREAM_CACHE_PREFIX, cachePluginPrefix, escapeRe } from "./cache-layout.mjs";
 
 /**
  * Convert any path string to forward slashes (matches normalize-hooks style,
@@ -232,10 +233,14 @@ export function selfHealCacheHealHook({
  *
  * This helper rewrites the version segment of every context-mode PATH
  * entry in every snapshot under `snapshotsDir` to `currentVersion`.
- * Anchored on the doubled `context-mode/context-mode/` segment so sibling
+ * Anchored on the `<marketplace>/<plugin>/` segment pair so sibling
  * plugins (`pm-skills/pm-toolkit`, `claude-adhd/claude-adhd`, …) and
  * shape-spoofing entries (`evil-owner/context-mode/1.0.146`) are
- * untouched.
+ * untouched. That pair is derived from `pluginCacheRoot` (this install's
+ * own `<cache>/<marketplace>/<plugin>` dir) rather than hardcoded: the
+ * marketplace name is not always `context-mode`, and a stale literal
+ * anchors on a directory that does not exist. Falls back to the upstream
+ * pair when no cache root is supplied.
  *
  * Layered like cache-heal-utils' brew-node fix:
  *   Layer 1 — /ctx-upgrade calls this after install (cli.ts) so the
@@ -259,7 +264,7 @@ export function selfHealCacheHealHook({
  *     writes paths using whatever shell wrote them, so all three
  *     shapes can appear depending on the user's shell environment.
  */
-export function rewriteShellSnapshots({ snapshotsDir, currentVersion }) {
+export function rewriteShellSnapshots({ snapshotsDir, currentVersion, pluginCacheRoot }) {
   const out = { rewritten: [] };
   if (
     !snapshotsDir ||
@@ -278,18 +283,23 @@ export function rewriteShellSnapshots({ snapshotsDir, currentVersion }) {
   }
 
   // Match the version segment of any PATH entry of the form
-  //   …/plugins/cache/context-mode/context-mode/<VERSION>/bin
-  // across all three path shapes (`/`, `\`, mixed). The doubled
-  // `context-mode/context-mode/` is the trust anchor — it prevents
-  // shape-spoofing from another owner.
+  //   …/plugins/cache/<marketplace>/<plugin>/<VERSION>/bin
+  // across all three path shapes (`/`, `\`, mixed). The
+  // `<marketplace>/<plugin>/` pair is the trust anchor — it prevents
+  // shape-spoofing from another owner. It comes from this install's own
+  // cache root so a fork served from a different marketplace still heals.
   //
   // Captures:
-  //   $1 — separator-tolerant prefix up to and including the second
-  //        `context-mode` segment + its trailing separator
+  //   $1 — separator-tolerant prefix up to and including the plugin
+  //        segment + its trailing separator
   //   $2 — version segment (no separators)
   //   $3 — trailing separator + `bin`
-  const versionSegmentRe =
-    /(context-mode[/\\]context-mode[/\\])([^/\\]+)([/\\]bin)/g;
+  const anchor = cachePluginPrefix(pluginCacheRoot) ?? UPSTREAM_CACHE_PREFIX;
+  const anchorPattern = anchor.split("/").map(escapeRe).join("[/\\\\]");
+  const versionSegmentRe = new RegExp(
+    `(${anchorPattern}[/\\\\])([^/\\\\]+)([/\\\\]bin)`,
+    "g",
+  );
 
   for (const name of entries) {
     if (!name.endsWith(".sh")) continue;
@@ -342,19 +352,16 @@ export function rewriteShellSnapshots({ snapshotsDir, currentVersion }) {
  * environment (or accepts explicit overrides for tests) and delegates to
  * `rewriteShellSnapshots`. Wrap-and-swallow; never throws.
  *
- * `pluginCacheRoot` is accepted to match the cache-heal-utils precedent
- * surface but not yet used (the version segment alone is sufficient for
- * the regex match — we don't need to walk the cache to know the right
- * answer; the cli passes the version it just installed). Kept in the
- * shape for forward-compat if a future heal pass needs to cross-check
- * the on-disk symlink target.
+ * `pluginCacheRoot` supplies the `<marketplace>/<plugin>` trust anchor the
+ * rewrite matches on. Omit it and the rewrite falls back to the upstream
+ * `context-mode/context-mode` pair, which only matches upstream installs.
  */
 export function selfHealShellSnapshots({
   snapshotsDir,
-  pluginCacheRoot: _pluginCacheRoot,
+  pluginCacheRoot,
   currentVersion,
 }) {
-  return rewriteShellSnapshots({ snapshotsDir, currentVersion });
+  return rewriteShellSnapshots({ snapshotsDir, currentVersion, pluginCacheRoot });
 }
 
 /**

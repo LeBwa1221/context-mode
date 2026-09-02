@@ -1012,15 +1012,21 @@ async function doctor(): Promise<number> {
   // Per ISSUE-604-VERDICT §11 same trust contract as Tier C check above.
   p.log.step("Checking for leftover .mcp.json files from older versions...");
   {
-    const cacheRoot = join(
-      homedir(),
-      ".claude",
-      "plugins",
-      "cache",
-      "context-mode",
-      "context-mode",
-    );
-    if (!existsSync(cacheRoot)) {
+    // Claude Code installs at plugins/cache/<marketplace>/<plugin>/<version>,
+    // where <marketplace> is whichever marketplace the plugin was added from.
+    // This used to hardcode the upstream `context-mode/context-mode` pair, so
+    // on a fork served from any other marketplace the directory did not exist
+    // and doctor reported SKIP forever. Enumerate the marketplaces instead —
+    // this is a read-only scan, so covering a legacy upstream install
+    // alongside the fork's is strictly more informative.
+    const cacheParent = join(homedir(), ".claude", "plugins", "cache");
+    let cacheRoots: string[] = [];
+    try {
+      cacheRoots = readdirSync(cacheParent)
+        .map((marketplace) => join(cacheParent, marketplace, "context-mode"))
+        .filter((dir) => existsSync(dir));
+    } catch { /* no cache tree at all — handled as SKIP below */ }
+    if (cacheRoots.length === 0) {
       p.log.info(
         color.dim("Leftover .mcp.json check: SKIP — no plugin cache exists yet (Claude Code has not installed context-mode here)"),
       );
@@ -1028,12 +1034,13 @@ async function doctor(): Promise<number> {
       let staleCount = 0;
       const staleVersions: string[] = [];
       try {
-        const versionDirs = readdirSync(cacheRoot);
-        for (const v of versionDirs) {
-          const candidate = join(cacheRoot, v, ".mcp.json");
-          if (existsSync(candidate)) {
-            staleCount++;
-            if (staleVersions.length < 5) staleVersions.push(v);
+        for (const cacheRoot of cacheRoots) {
+          for (const v of readdirSync(cacheRoot)) {
+            const candidate = join(cacheRoot, v, ".mcp.json");
+            if (existsSync(candidate)) {
+              staleCount++;
+              if (staleVersions.length < 5) staleVersions.push(v);
+            }
           }
         }
       } catch (err: unknown) {
@@ -1042,7 +1049,7 @@ async function doctor(): Promise<number> {
           color.yellow("Leftover .mcp.json check: WARN") +
             ` — could not read the plugin cache directory` +
             color.dim(
-              `\n  Path: ${cacheRoot}` +
+              `\n  Path: ${cacheRoots.join(", ")}` +
               `\n  Reason: ${msg.slice(0, 160)}` +
               "\n  Fix: check that the directory is readable, then re-run doctor. If the issue persists, run /context-mode:ctx-upgrade.",
             ),
@@ -1506,11 +1513,13 @@ async function upgrade(opts?: { platform?: string }) {
           const { rewriteShellSnapshots } = await import(
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             "../hooks/cache-heal-utils.mjs" as any
-          ) as { rewriteShellSnapshots: (opts: { snapshotsDir: string; currentVersion: string }) => { rewritten: string[] } };
+          ) as { rewriteShellSnapshots: (opts: { snapshotsDir: string; currentVersion: string; pluginCacheRoot?: string }) => { rewritten: string[] } };
           const snapshotsDir = resolve(resolveClaudeConfigDir(), "shell-snapshots");
           const result = rewriteShellSnapshots({
             snapshotsDir,
             currentVersion: newVersion,
+            // <cache>/<marketplace>/<plugin> — the rewrite's trust anchor.
+            pluginCacheRoot: dirname(pluginRoot),
           });
           if (result.rewritten.length > 0) {
             p.log.info(color.dim(`  Healed ${result.rewritten.length} stale shell snapshot(s) — Bash tool calls in the active session will pick up v${newVersion} immediately`));
