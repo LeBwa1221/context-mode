@@ -475,7 +475,6 @@ describe("Issue #531 — asymmetric-drift invariant", () => {
         join(scratch, "scripts", "heal-installed-plugins.mjs"),
         [
           "export function healInstalledPlugins() { return { skipped: 'test-stub' }; }",
-          "export function healSettingsEnabledPlugins() { return { healed: [] }; }",
           "export function healPluginJsonMcpServers() { return { healed: [] }; }",
           "export function healMcpJsonArgs() { return { healed: [] }; }",
           // Issue #609 — sweepStaleMcpJson replaced per-entry healMcpJsonArgs.

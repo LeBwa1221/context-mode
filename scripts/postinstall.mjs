@@ -14,7 +14,7 @@ import { dirname, resolve, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { healBetterSqlite3Binding } from "./heal-better-sqlite3.mjs";
-import { healInstalledPlugins, healSettingsEnabledPlugins, healPluginJsonMcpServers, sweepStaleMcpJson } from "./heal-installed-plugins.mjs";
+import { healInstalledPlugins, healPluginJsonMcpServers, sweepStaleMcpJson } from "./heal-installed-plugins.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = resolve(__dirname, "..");
@@ -140,20 +140,6 @@ if (isGlobalInstall()) {
       process.stderr.write(`context-mode: install OK, heal aborted (${(err && err.message) || err})\n`);
     } catch { /* truly best effort */ }
   }
-
-  // v1.0.116: also heal settings.json.enabledPlugins (the file Claude Code's
-  // plugin loader actually reads). v1.0.114 only touched installed_plugins.json.
-  try {
-    const settingsPath = resolve(homedir(), ".claude", "settings.json");
-    const r = healSettingsEnabledPlugins({
-      settingsPath,
-      pluginKey: "context-mode@context-mode",
-    });
-    if (r.healed && r.healed.length > 0) {
-      process.stderr.write(`context-mode: healed settings.json (${r.healed.join(", ")})\n`);
-    }
-    // skipped/error: silent — already covered by the prior heal's stderr line.
-  } catch { /* never block install */ }
 
   // v1.0.119: Layer 5b (Issue #523). Heal .claude-plugin/plugin.json's
   // mcpServers["context-mode"].args[0] when /ctx-upgrade left a tmpdir-prefixed

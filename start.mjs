@@ -235,19 +235,13 @@ if (cacheMatch) {
 // truth) so users who fix themselves via `npm install -g context-mode`
 // follow the exact same code path. Best-effort, never blocks MCP boot.
 try {
-  const { healInstalledPlugins, healSettingsEnabledPlugins, healPluginJsonMcpServers, sweepStaleMcpJson } =
+  const { healInstalledPlugins, healPluginJsonMcpServers, sweepStaleMcpJson } =
     await import("./scripts/heal-installed-plugins.mjs");
   const pluginKey = "context-mode@context-mode";
   const claudeConfigDir = resolveClaudeConfigDir();
   const registryPath = resolve(claudeConfigDir, "plugins", "installed_plugins.json");
   const pluginCacheRoot = resolve(claudeConfigDir, "plugins", "cache");
-  const settingsPath = resolve(claudeConfigDir, "settings.json");
   try { healInstalledPlugins({ registryPath, pluginCacheRoot, pluginKey }); }
-  catch { /* best effort */ }
-  // v1.0.116: Claude Code's plugin loader reads settings.json.enabledPlugins
-  // (NOT installed_plugins.json) — heal that one too so /ctx-upgrade-induced
-  // disable state is repaired before next /reload-plugins.
-  try { healSettingsEnabledPlugins({ settingsPath, pluginKey }); }
   catch { /* best effort */ }
   // v1.0.119 — Layer 5b (Issue #523): heal .claude-plugin/plugin.json's
   // mcpServers["context-mode"].args[0] when /ctx-upgrade left a tmpdir-prefixed

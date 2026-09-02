@@ -128,58 +128,6 @@ export function healInstalledPlugins({ registryPath, pluginCacheRoot, pluginKey 
   return { healed };
 }
 
-/**
- * Heal `~/.claude/settings.json.enabledPlugins[pluginKey]`.
- *
- * v1.0.114's heal targeted `installed_plugins.json.enabledPlugins`, which is
- * what we control. But Claude Code's plugin loader actually reads the truth
- * from `settings.json.enabledPlugins`. After every `/ctx-upgrade`, Claude
- * Code's plugin manager seems to clear the settings.json key (likely on
- * version-mismatch detection), so the plugin appears disabled even though
- * `installed_plugins.json` is fully consistent. v1.0.116 closes that gap.
- *
- * Respects explicit user opt-out: if the key is `false`, leaves it alone.
- *
- * @param {{ settingsPath: string, pluginKey: string }} opts
- * @returns {HealResult}
- */
-export function healSettingsEnabledPlugins({ settingsPath, pluginKey }) {
-  if (!settingsPath || !existsSync(settingsPath)) {
-    return { healed: [], skipped: "no-settings" };
-  }
-
-  let raw;
-  try { raw = readFileSync(settingsPath, "utf-8"); }
-  catch (err) { return { healed: [], error: `read-failed: ${(err && err.message) || err}` }; }
-
-  let settings;
-  try { settings = JSON.parse(raw); }
-  catch (err) { return { healed: [], error: `parse-failed: ${(err && err.message) || err}` }; }
-
-  const healed = [];
-  if (!settings.enabledPlugins || typeof settings.enabledPlugins !== "object" || Array.isArray(settings.enabledPlugins)) {
-    settings.enabledPlugins = {};
-  }
-  const current = settings.enabledPlugins[pluginKey];
-  if (current === false) {
-    return { healed: [], skipped: "explicit-opt-out" };
-  }
-  if (current !== true) {
-    settings.enabledPlugins[pluginKey] = true;
-    healed.push("enabled-plugins");
-  }
-
-  if (healed.length > 0) {
-    try {
-      writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
-    } catch (err) {
-      return { healed: [], error: `write-failed: ${(err && err.message) || err}` };
-    }
-  }
-
-  return { healed };
-}
-
 // ─────────────────────────────────────────────────────────────────────────
 // Issue #523 (v1.0.119) — Layer 5 heal: plugin.json mcpServers args
 //

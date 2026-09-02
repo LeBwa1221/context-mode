@@ -29,7 +29,6 @@ import { join, resolve } from "node:path";
 import {
   healInstalledPlugins,
   // @ts-expect-error — JS module, no TS declarations
-  healSettingsEnabledPlugins,
   // @ts-expect-error — JS module, no TS declarations
   healPluginJsonMcpServers,
   // @ts-expect-error — JS module, no TS declarations
@@ -290,102 +289,6 @@ describe("healInstalledPlugins — defensive paths", () => {
       readFileSync(resolve(__dirname, "../../package.json"), "utf-8"),
     ) as { files: string[] };
     expect(pkg.files).toContain("scripts/heal-installed-plugins.mjs");
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────
-// healSettingsEnabledPlugins — v1.0.116 hotfix
-// Claude Code's plugin loader reads ~/.claude/settings.json.enabledPlugins
-// (NOT installed_plugins.json). v1.0.114's heal targeted the wrong file —
-// users still saw "Plugin enabled: WARN — No enabledPlugins section found"
-// after every /ctx-upgrade. This adds the parallel heal for settings.json.
-// ─────────────────────────────────────────────────────────────────────────
-
-describe("healSettingsEnabledPlugins (v1.0.116)", () => {
-  function tmp(): string {
-    const d = mkdtempSync(join(tmpdir(), "ctx-settings-heal-"));
-    cleanups.push(d);
-    return d;
-  }
-
-  it("creates enabledPlugins section + adds key when settings.json is missing the section", () => {
-    const dir = tmp();
-    const settingsPath = join(dir, "settings.json");
-    writeFileSync(settingsPath, JSON.stringify({ theme: "dark" }, null, 2));
-
-    const result = healSettingsEnabledPlugins({
-      settingsPath,
-      pluginKey: "context-mode@context-mode",
-    });
-
-    expect(result.healed).toContain("enabled-plugins");
-    const after = JSON.parse(readFileSync(settingsPath, "utf-8"));
-    expect(after.theme).toBe("dark"); // unrelated state preserved
-    expect(after.enabledPlugins).toEqual({ "context-mode@context-mode": true });
-  });
-
-  it("adds the key when section exists but ours is missing", () => {
-    const dir = tmp();
-    const settingsPath = join(dir, "settings.json");
-    writeFileSync(settingsPath, JSON.stringify({ enabledPlugins: { "other@other": true } }, null, 2));
-
-    const result = healSettingsEnabledPlugins({
-      settingsPath,
-      pluginKey: "context-mode@context-mode",
-    });
-
-    expect(result.healed).toContain("enabled-plugins");
-    const after = JSON.parse(readFileSync(settingsPath, "utf-8"));
-    expect(after.enabledPlugins).toEqual({
-      "other@other": true,
-      "context-mode@context-mode": true,
-    });
-  });
-
-  it("idempotent — does not rewrite or report healed when key already true", () => {
-    const dir = tmp();
-    const settingsPath = join(dir, "settings.json");
-    writeFileSync(
-      settingsPath,
-      JSON.stringify({ enabledPlugins: { "context-mode@context-mode": true } }, null, 2),
-    );
-    const before = readFileSync(settingsPath, "utf-8");
-
-    const result = healSettingsEnabledPlugins({
-      settingsPath,
-      pluginKey: "context-mode@context-mode",
-    });
-
-    expect(result.healed).toEqual([]);
-    expect(readFileSync(settingsPath, "utf-8")).toBe(before);
-  });
-
-  it("respects explicit user opt-out — does NOT flip false to true", () => {
-    const dir = tmp();
-    const settingsPath = join(dir, "settings.json");
-    writeFileSync(
-      settingsPath,
-      JSON.stringify({ enabledPlugins: { "context-mode@context-mode": false } }, null, 2),
-    );
-
-    const result = healSettingsEnabledPlugins({
-      settingsPath,
-      pluginKey: "context-mode@context-mode",
-    });
-
-    expect(result.healed).toEqual([]);
-    expect(result.skipped).toBe("explicit-opt-out");
-    const after = JSON.parse(readFileSync(settingsPath, "utf-8"));
-    expect(after.enabledPlugins["context-mode@context-mode"]).toBe(false);
-  });
-
-  it("returns silent skip when settings.json does not exist (user not on Claude Code)", () => {
-    const result = healSettingsEnabledPlugins({
-      settingsPath: "/nonexistent/path/settings.json",
-      pluginKey: "context-mode@context-mode",
-    });
-    expect(result.healed).toEqual([]);
-    expect(result.skipped).toBe("no-settings");
   });
 });
 
